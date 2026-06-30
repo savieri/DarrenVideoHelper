@@ -1,0 +1,23 @@
+Darren Video Helper - Windows Host Build Required
+
+This Windows package was assembled on macOS.
+
+PyInstaller cannot cross-compile a Windows host.exe from macOS, so native\host.exe is not included unless the package is rebuilt on Windows.
+
+To create the final Windows package:
+
+1. Open PowerShell on Windows.
+2. cd into this folder.
+3. Run:
+
+   powershell -ExecutionPolicy Bypass -File .\build-windows-host.ps1
+
+4. Confirm this file exists:
+
+   native\host.exe
+
+5. Run:
+
+   .\install.bat
+
+After native\host.exe exists, users do not need Python.

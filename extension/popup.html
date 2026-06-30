@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Darren Video Helper</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <img class="brand-icon" src="icons/icon48.png" alt="">
+      <div class="title-block">
+        <p class="eyebrow">Universal Web Video Downloader</p>
+        <p class="recommend-title">推荐下载视频</p>
+        <h1 id="pageTitle">Waiting for current tab...</h1>
+      </div>
+      <div class="top-actions">
+        <button id="refreshButton" class="icon-button" type="button" title="刷新">↻</button>
+        <button id="optionsButton" class="icon-button" type="button" title="设置">⚙</button>
+      </div>
+    </header>
+
+    <section id="notice" class="notice" hidden></section>
+
+    <section class="quick-actions">
+      <button id="downloadRecommendedButton" class="primary" type="button">下载推荐</button>
+      <button id="pauseQueueButton" type="button">暂停</button>
+      <button id="resumeQueueButton" type="button">继续</button>
+      <label class="import-button">
+        导入
+        <input id="importFile" type="file" accept=".txt,.csv,text/plain,text/csv" hidden>
+      </label>
+    </section>
+
+    <main id="streams" class="streams"></main>
+
+    <section id="jobs" class="jobs" hidden>
+      <div class="section-title">
+        <h2>下载队列</h2>
+        <span id="queueState"></span>
+      </div>
+      <div id="jobList"></div>
+    </section>
+
+    <footer>
+      <button id="reloadExtensionButton" type="button">Reload</button>
+      <span>Cmd+Shift+R</span>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

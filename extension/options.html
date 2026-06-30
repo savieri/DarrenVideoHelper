@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Darren Video Helper Options</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main class="panel">
+      <header>
+        <div class="brand">
+          <img src="icons/icon48.png" alt="">
+          <div>
+            <h1>Darren Video Helper</h1>
+            <p>Universal Web Video Downloader</p>
+          </div>
+        </div>
+        <p id="status">Options</p>
+      </header>
+
+      <label>
+        <span>下载目录</span>
+        <input id="outputDir" type="text" spellcheck="false">
+      </label>
+
+      <label>
+        <span>默认清晰度</span>
+        <select id="defaultQuality">
+          <option value="best">best</option>
+          <option value="1080p">1080p</option>
+          <option value="720p">720p</option>
+          <option value="480p">480p</option>
+        </select>
+      </label>
+
+      <label>
+        <span>最大并发数</span>
+        <input id="maxConcurrent" type="number" min="1" max="6" step="1">
+      </label>
+
+      <section class="checks">
+        <label><input id="autoCookies" type="checkbox"> 自动读取 Chrome cookies</label>
+        <label><input id="skipDownloaded" type="checkbox"> 跳过已下载</label>
+        <label><input id="onlyMp4" type="checkbox"> 只下载 MP4</label>
+        <label><input id="showAdvanced" type="checkbox"> 显示高级候选项</label>
+      </section>
+
+      <div class="actions">
+        <button id="saveButton" class="primary" type="button">Save</button>
+        <button id="clearHistoryButton" type="button">清理下载历史</button>
+      </div>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+</html>

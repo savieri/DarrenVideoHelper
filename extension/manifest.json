@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "Darren Video Helper",
+  "short_name": "Video Helper",
+  "description": "Universal Web Video Downloader for browser-playable non-DRM HLS/MP4 video.",
+  "version": "1.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApWa0owsnSiltR8LQsRiNQQ8PjcIrM9kb6KmHP5OAPJy29hp45wzovdfLyZkjn8l3vqbM6LXCNbY15uYK6ouMxDhq5m0JJBDBryajcZtTzSuaqOL7TO9Ag4u8PHcHVoA6C4a1HHTnmahP9Ps64wIfumyuPdZyFlFiQg8qWWRQ8Wc53DEtP/P9AhQaosfAoNWR3yJQQ1t4EWEYkP1Fsum1ezsDgVbKFT3v1uhTUhQal0a9vmTVXxvNP/i3T2kKCYQJwWNQ8Lqaay+1ryvNm+6lICSeDq6pnTRDmWVxnhbyplKDiVwFiCBRpA+GVdFy5G4JIel8MvGWMHb1CchNQqrs8QIDAQAB",
+  "minimum_chrome_version": "114",
+  "permissions": [
+    "activeTab",
+    "clipboardWrite",
+    "nativeMessaging",
+    "scripting",
+    "storage",
+    "tabs",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Darren Video Helper",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "options_page": "options.html",
+  "commands": {
+    "reload_extension": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+R",
+        "mac": "Command+Shift+R"
+      },
+      "description": "Reload this extension during local development"
+    }
+  }
+}
