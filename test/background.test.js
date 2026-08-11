@@ -157,6 +157,119 @@ test("YouTube extractor is a real full-video candidate and A to B rotates sessio
   assert.equal(result.rotated, true);
 });
 
+test("YouTube SPA start invalidates A before B, back A, and forward B commit", () => {
+  const { context } = loadBackground();
+  const result = evaluate(context, `(() => {
+    const a = commitVideoNavigation(22, {
+      pageUrl: "https://www.youtube.com/watch?v=videoA",
+      pageIdentity: "youtube:videoA",
+      videoId: "videoA",
+      reason: "content-ready"
+    });
+    const aCandidate = makePageExtractorCandidate(snapshotVideoSession(a));
+    upsertStream(22, "https://r1.googlevideo.com/videoplayback?id=videoA&itag=137&mime=video%2Fmp4", { source: "network" });
+    invalidateVideoSession(22, { reason: "youtube-navigate-start", pageUrl: a.pageUrl });
+    const staleWhileNavigating = validateDownloadSelection(a, aCandidate);
+    const b = commitVideoNavigation(22, {
+      pageUrl: "https://www.youtube.com/watch?v=videoB",
+      pageIdentity: "youtube:videoB",
+      videoId: "videoB",
+      reason: "youtube-navigate-finish"
+    });
+    const backA = (() => {
+      invalidateVideoSession(22, { reason: "popstate", pageUrl: b.pageUrl });
+      return commitVideoNavigation(22, {
+        pageUrl: "https://www.youtube.com/watch?v=videoA",
+        pageIdentity: "youtube:videoA",
+        videoId: "videoA",
+        reason: "popstate"
+      });
+    })();
+    const forwardB = (() => {
+      invalidateVideoSession(22, { reason: "popstate", pageUrl: backA.pageUrl });
+      return commitVideoNavigation(22, {
+        pageUrl: "https://www.youtube.com/watch?v=videoB",
+        pageIdentity: "youtube:videoB",
+        videoId: "videoB",
+        reason: "popstate"
+      });
+    })();
+    return {
+      staleWhileNavigating,
+      aId: a.sessionId,
+      bId: b.sessionId,
+      backAId: backA.sessionId,
+      forwardBId: forwardB.sessionId,
+      bIdentity: b.pageIdentity,
+      backIdentity: backA.pageIdentity,
+      forwardIdentity: forwardB.pageIdentity,
+      bStreamCount: b.streams.size,
+      bTitle: b.pageTitle
+    };
+  })()`);
+  assert.equal(result.staleWhileNavigating.ok, false);
+  assert.equal(result.staleWhileNavigating.stale, true);
+  assert.notEqual(result.aId, result.bId);
+  assert.notEqual(result.bId, result.backAId);
+  assert.notEqual(result.backAId, result.forwardBId);
+  assert.equal(result.bIdentity, "youtube:videoB");
+  assert.equal(result.backIdentity, "youtube:videoA");
+  assert.equal(result.forwardIdentity, "youtube:videoB");
+  assert.equal(result.bStreamCount, 0);
+  assert.equal(result.bTitle, "正在检测视频…");
+});
+
+test("stale YouTube metadata cannot repopulate a newly committed video", () => {
+  const { context } = loadBackground();
+  const result = evaluate(context, `(() => {
+    commitVideoNavigation(23, {
+      pageUrl: "https://www.youtube.com/watch?v=videoA",
+      pageIdentity: "youtube:videoA",
+      videoId: "videoA",
+      pageTitle: "Video A"
+    });
+    const stale = updateVideoContext(23, {
+      pageUrl: "https://www.youtube.com/watch?v=videoB",
+      pageIdentity: "youtube:videoB",
+      videoId: "videoB",
+      metadataVideoId: "videoA",
+      metadataMatchesPage: false,
+      pageTitle: "Video A",
+      poster: "https://i.ytimg.com/a.jpg",
+      mainVideo: { currentSrc: "blob:https://www.youtube.com/a", duration: 600 }
+    });
+    const staleSnapshot = {
+      title: stale.pageTitle,
+      poster: stale.thumbnailUrl,
+      duration: stale.videoDuration
+    };
+    const fresh = updateVideoContext(23, {
+      pageUrl: "https://www.youtube.com/watch?v=videoB",
+      pageIdentity: "youtube:videoB",
+      videoId: "videoB",
+      metadataVideoId: "videoB",
+      metadataMatchesPage: true,
+      pageTitle: "Video B",
+      poster: "https://i.ytimg.com/b.jpg",
+      mainVideo: { currentSrc: "blob:https://www.youtube.com/b", duration: 900 }
+    });
+    return {
+      staleTitle: staleSnapshot.title,
+      stalePoster: staleSnapshot.poster,
+      staleDuration: staleSnapshot.duration,
+      freshTitle: fresh.pageTitle,
+      freshPoster: fresh.thumbnailUrl,
+      freshDuration: fresh.videoDuration
+    };
+  })()`);
+  assert.equal(result.staleTitle, "正在检测视频…");
+  assert.equal(result.stalePoster, "");
+  assert.equal(result.staleDuration, 0);
+  assert.equal(result.freshTitle, "Video B");
+  assert.equal(result.freshPoster, "https://i.ytimg.com/b.jpg");
+  assert.equal(result.freshDuration, 900);
+});
+
 test("YouTube videoplayback DASH URLs are captured and grouped by media identity", () => {
   const { context } = loadBackground();
   const result = evaluate(context, `(() => {

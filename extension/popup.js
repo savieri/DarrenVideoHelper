@@ -1,6 +1,7 @@
 let currentTabId = null;
 let currentState = null;
 const jobCache = new Map();
+let sessionRefreshTimer = 0;
 
 const pageTitleEl = document.getElementById("pageTitle");
 const noticeEl = document.getElementById("notice");
@@ -32,6 +33,18 @@ resumeQueueButton.addEventListener("click", async () => {
 importFileEl.addEventListener("change", importUrlFile);
 
 chrome.runtime.onMessage.addListener((message) => {
+  if (message?.tabId === currentTabId && message.type === "videoSessionInvalidated") {
+    currentState = { ...(currentState || {}), navigating: true, streams: [], recommended: null };
+    pageTitleEl.textContent = "正在切换视频…";
+    renderStreams([]);
+    showNotice("页面正在切换，上一视频已失效。正在检测新视频…", "warning");
+    return;
+  }
+  if (message?.tabId === currentTabId && message.type === "videoSessionChanged") {
+    window.clearTimeout(sessionRefreshTimer);
+    sessionRefreshTimer = window.setTimeout(loadStreams, 120);
+    return;
+  }
   if (!message || message.type !== "jobUpdate" || !message.job) return;
   jobCache.set(message.job.id, message.job);
   if (currentState) currentState.queuePaused = Boolean(message.queuePaused);

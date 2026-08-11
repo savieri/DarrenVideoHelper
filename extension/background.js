@@ -79,27 +79,30 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.url) {
-    rotateVideoSession(tabId, {
+    commitVideoNavigation(tabId, {
       pageUrl: changeInfo.url,
+      pageIdentity: pageVideoIdentity(changeInfo.url),
       pageTitle: tab?.title || "video",
       reason: "tab-url"
     });
   } else if (changeInfo.title) {
     const state = tabState.get(tabId);
-    if (state) state.pageTitle = changeInfo.title || state.pageTitle;
+    if (state && !state.invalidated) state.pageTitle = changeInfo.title || state.pageTitle;
   }
 });
 
 if (chrome.webNavigation) {
-  const handleNavigation = (details, reason) => {
+  const handleNavigation = (details, reason, forceDocumentBoundary = false) => {
     if (details.frameId !== 0 || details.tabId < 0) return;
-    rotateVideoSession(details.tabId, {
+    commitVideoNavigation(details.tabId, {
       pageUrl: details.url,
+      pageIdentity: pageVideoIdentity(details.url),
       documentId: details.documentId || "",
-      reason
+      reason,
+      forceDocumentBoundary
     });
   };
-  chrome.webNavigation.onCommitted.addListener((details) => handleNavigation(details, "navigation"));
+  chrome.webNavigation.onCommitted.addListener((details) => handleNavigation(details, "navigation", true));
   chrome.webNavigation.onHistoryStateUpdated.addListener((details) => handleNavigation(details, "history"));
   chrome.webNavigation.onReferenceFragmentUpdated.addListener((details) => handleNavigation(details, "fragment"));
 }
@@ -206,6 +209,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.type === "videoNavigation" && sender.tab?.id != null) {
+    const navigation = message.navigation || {};
+    if (navigation.phase === "start") {
+      invalidateVideoSession(sender.tab.id, navigation);
+    } else {
+      commitVideoNavigation(sender.tab.id, navigation);
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
   return false;
 });
 
@@ -218,10 +232,15 @@ async function getPopupState(tabId, retryCount = 0) {
 
   let state = ensureVideoSession(tab.id, {
     pageUrl: tab.url || "",
+    pageIdentity: pageVideoIdentity(tab.url || ""),
     pageTitle: tab.title || "video",
     reason: "popup"
   });
+  if (state.invalidated) {
+    return navigationPopupState(tab, state, settings);
+  }
   state = await collectMediaHints(tab, state);
+  if (state.invalidated) return navigationPopupState(tab, state, settings);
   const sessionSnapshot = snapshotVideoSession(state);
 
   const allSessionStreams = sortedStreams(state)
@@ -277,6 +296,26 @@ async function getPopupState(tabId, retryCount = 0) {
   };
 }
 
+function navigationPopupState(tab, state, settings) {
+  return {
+    ok: true,
+    navigating: true,
+    tabId: tab.id,
+    sessionId: state.sessionId,
+    fingerprint: state.fingerprint,
+    pageTitle: "正在切换视频…",
+    pageUrl: tab.url || state.pendingPageUrl || state.pageUrl,
+    thumbnailUrl: "",
+    streams: [],
+    recommended: null,
+    detectedStreamCount: 0,
+    warning: "页面正在切换，上一视频已失效。正在检测新视频…",
+    settings,
+    queuePaused,
+    jobs: publicJobs()
+  };
+}
+
 async function getActiveTab() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   return tabs && tabs[0];
@@ -322,10 +361,17 @@ async function collectMediaHints(tab, state) {
           document.querySelector('meta[name="twitter:title"]')?.content ||
           document.title ||
           "";
+        const metadataVideoId =
+          document.querySelector("ytd-watch-flexy[video-id]")?.getAttribute("video-id") ||
+          document.querySelector("#movie_player[data-video-id]")?.getAttribute("data-video-id") ||
+          document.querySelector('meta[itemprop="videoId"]')?.content ||
+          document.querySelector('meta[itemprop="identifier"]')?.content ||
+          "";
         return {
           title: metaTitle,
           pageUrl: location.href,
           poster: absolute(videos.find((item) => item.poster)?.poster || metaImage),
+          metadataVideoId,
           videos
         };
       }
@@ -343,12 +389,20 @@ async function collectMediaHints(tab, state) {
       if (areaDiff) return areaDiff;
       return (b.duration || 0) - (a.duration || 0);
     })[0];
+    const extractor = pageExtractorInfo(hints.pageUrl);
+    const metadataMatchesPage = !extractor?.videoId
+      || !hints.metadataVideoId
+      || extractor.videoId === hints.metadataVideoId;
     state = updateVideoContext(tab.id, {
       pageUrl: hints.pageUrl,
-      pageTitle: hints.title,
-      poster: hints.poster,
+      pageIdentity: pageVideoIdentity(hints.pageUrl),
+      videoId: extractor?.videoId || "",
+      metadataVideoId: hints.metadataVideoId || "",
+      metadataMatchesPage,
+      pageTitle: metadataMatchesPage ? hints.title : "",
+      poster: metadataMatchesPage ? hints.poster : "",
       hasVideoElement: Boolean(videos.length),
-      mainVideo,
+      mainVideo: metadataMatchesPage ? mainVideo : null,
       reason: "popup-hints"
     });
 
@@ -582,7 +636,7 @@ function findDownloadStream(state, streamId) {
 
 function validateDownloadSelection(state, selection) {
   const resourceId = selection.resourceId || selection.streamId || selection.id;
-  if (!resourceId || selection.sessionId !== state.sessionId) return staleSelectionResponse();
+  if (state.invalidated || !resourceId || selection.sessionId !== state.sessionId) return staleSelectionResponse();
   const stream = findDownloadStream(state, resourceId);
   if (!stream || stream.kind === "page" || stream.kind === "segment"
     || stream.kind === "dash_video" || stream.kind === "dash_audio") return staleSelectionResponse();
@@ -934,6 +988,8 @@ function snapshotVideoSession(state) {
     tabId: state.tabId,
     pageUrl: state.pageUrl,
     pageTitle: state.pageTitle,
+    pageIdentity: state.pageIdentity,
+    videoId: state.videoId,
     currentSrc: state.currentSrc,
     createdAt: state.createdAt,
     fingerprint: state.fingerprint,
@@ -942,7 +998,8 @@ function snapshotVideoSession(state) {
     videoDuration: state.videoDuration,
     mainVideoHeight: state.mainVideoHeight,
     mainVideoWidth: state.mainVideoWidth,
-    mainVideoObservedAt: state.mainVideoObservedAt
+    mainVideoObservedAt: state.mainVideoObservedAt,
+    invalidated: state.invalidated === true
   });
 }
 
@@ -1182,13 +1239,18 @@ function candidateScore(stream, state) {
 
 function createVideoSession(tabId, context = {}) {
   const pageUrl = context.pageUrl || "";
-  const currentSrc = context.currentSrc || "";
+  const pageIdentity = context.pageIdentity || pageVideoIdentity(pageUrl);
+  const extractor = pageExtractorInfo(pageUrl);
+  const resetMetadata = context.resetMetadata === true;
+  const currentSrc = resetMetadata ? "" : (context.currentSrc || "");
   const createdAt = Date.now();
   return {
     sessionId: makeId("session"),
     tabId,
-    pageTitle: context.pageTitle || "video",
+    pageTitle: resetMetadata ? "正在检测视频…" : (context.pageTitle || "video"),
     pageUrl,
+    pageIdentity,
+    videoId: context.videoId || extractor?.videoId || "",
     documentId: context.documentId || "",
     currentSrc,
     createdAt,
@@ -1203,7 +1265,11 @@ function createVideoSession(tabId, context = {}) {
     mainVideoHeight: 0,
     mainVideoWidth: 0,
     mainVideoObservedAt: currentSrc ? createdAt : 0,
-    mainPoster: context.poster || ""
+    mainPoster: resetMetadata ? "" : (context.poster || ""),
+    invalidated: false,
+    invalidatedAt: 0,
+    pendingPageUrl: "",
+    navigationReason: context.reason || ""
   };
 }
 
@@ -1216,11 +1282,24 @@ function ensureVideoSession(tabId, context = {}) {
   }
 
   const incomingPageUrl = context.pageUrl || "";
-  if (incomingPageUrl && state.pageUrl && !samePageIdentity(incomingPageUrl, state.pageUrl)) {
-    return rotateVideoSession(tabId, context);
+  const incomingIdentity = context.pageIdentity || pageVideoIdentity(incomingPageUrl);
+  if (incomingIdentity && state.pageIdentity && incomingIdentity !== state.pageIdentity) {
+    return rotateVideoSession(tabId, {
+      ...context,
+      pageIdentity: incomingIdentity,
+      forceSessionBoundary: true,
+      resetMetadata: true
+    });
   }
   if (!state.pageUrl && incomingPageUrl) state.pageUrl = incomingPageUrl;
-  if (context.pageTitle) state.pageTitle = context.pageTitle;
+  else if (incomingPageUrl && (!state.pageIdentity || incomingIdentity === state.pageIdentity)) {
+    state.pageUrl = incomingPageUrl;
+  }
+  if (!state.pageIdentity && incomingIdentity) state.pageIdentity = incomingIdentity;
+  if (context.videoId) state.videoId = context.videoId;
+  if (context.pageTitle && !state.invalidated && context.metadataMatchesPage !== false) {
+    state.pageTitle = context.pageTitle;
+  }
   if (context.documentId && !state.documentId) state.documentId = context.documentId;
   state.fingerprint = videoFingerprint(state.pageUrl, state.currentSrc);
   return state;
@@ -1233,17 +1312,24 @@ function ensureTabState(tabId) {
 function rotateVideoSession(tabId, context = {}) {
   const previous = tabState.get(tabId);
   const incomingPageUrl = context.pageUrl || previous?.pageUrl || "";
+  const incomingIdentity = context.pageIdentity || pageVideoIdentity(incomingPageUrl);
   const documentChanged = Boolean(
     context.documentId && previous?.documentId && context.documentId !== previous.documentId
   );
   const pageChanged = Boolean(
-    previous?.pageUrl && incomingPageUrl && !samePageIdentity(previous.pageUrl, incomingPageUrl)
+    previous?.pageIdentity && incomingIdentity && previous.pageIdentity !== incomingIdentity
   );
-  const forceDocumentBoundary = context.reason === "navigation" && documentChanged;
+  const forceDocumentBoundary = context.forceDocumentBoundary === true
+    || (context.reason === "navigation" && documentChanged);
   const forceVideoBoundary = context.reason === "current-src";
-  if (previous && !pageChanged && !forceDocumentBoundary && !forceVideoBoundary) {
-    if (context.pageTitle) previous.pageTitle = context.pageTitle;
+  const forceSessionBoundary = context.forceSessionBoundary === true;
+  if (previous && !pageChanged && !forceDocumentBoundary && !forceVideoBoundary && !forceSessionBoundary) {
+    if (context.pageTitle && !previous.invalidated && context.metadataMatchesPage !== false) {
+      previous.pageTitle = context.pageTitle;
+    }
     if (incomingPageUrl) previous.pageUrl = incomingPageUrl;
+    if (incomingIdentity) previous.pageIdentity = incomingIdentity;
+    if (context.videoId) previous.videoId = context.videoId;
     if (context.documentId) previous.documentId = context.documentId;
     previous.fingerprint = videoFingerprint(previous.pageUrl, previous.currentSrc);
     return previous;
@@ -1253,26 +1339,121 @@ function rotateVideoSession(tabId, context = {}) {
     previous.endedAt = Date.now();
     previous.endReason = context.reason || "navigation";
   }
+  const resetMetadata = context.resetMetadata === true || pageChanged || forceDocumentBoundary;
   const next = createVideoSession(tabId, {
     pageUrl: incomingPageUrl,
-    pageTitle: context.pageTitle || previous?.pageTitle || "video",
+    pageIdentity: incomingIdentity,
+    videoId: context.videoId || pageExtractorInfo(incomingPageUrl)?.videoId || "",
+    pageTitle: resetMetadata ? "" : (context.pageTitle || previous?.pageTitle || "video"),
     documentId: context.documentId || "",
     currentSrc: context.currentSrc || "",
-    poster: context.poster || ""
+    poster: context.poster || "",
+    resetMetadata,
+    reason: context.reason || "navigation"
   });
   tabState.set(tabId, next);
   return next;
 }
 
+function invalidateVideoSession(tabId, context = {}) {
+  let state = tabState.get(tabId);
+  if (!state) {
+    state = createVideoSession(tabId, {
+      pageUrl: context.pageUrl || "",
+      pageIdentity: context.pageIdentity || pageVideoIdentity(context.pageUrl || ""),
+      videoId: context.videoId || "",
+      resetMetadata: true,
+      reason: context.reason || "navigation-start"
+    });
+    tabState.set(tabId, state);
+  }
+  if (state.invalidated) return state;
+  state.invalidated = true;
+  state.invalidatedAt = Date.now();
+  state.pendingPageUrl = context.pageUrl || "";
+  state.navigationReason = context.reason || "navigation-start";
+  state.streams.clear();
+  state.headersByUrl.clear();
+  state.thumbnailUrl = "";
+  state.fingerprint = stableFingerprint(`${state.sessionId}|invalidated|${state.invalidatedAt}`);
+  broadcastSessionState("videoSessionInvalidated", state);
+  return state;
+}
+
+function commitVideoNavigation(tabId, context = {}) {
+  const previous = tabState.get(tabId);
+  const incomingPageUrl = context.pageUrl || previous?.pendingPageUrl || previous?.pageUrl || "";
+  const incomingIdentity = context.pageIdentity || pageVideoIdentity(incomingPageUrl);
+  const identityChanged = Boolean(
+    previous?.pageIdentity && incomingIdentity && previous.pageIdentity !== incomingIdentity
+  );
+  const mustRotate = Boolean(
+    previous && (
+      previous.invalidated
+      || identityChanged
+      || context.forceDocumentBoundary === true
+    )
+  );
+  let state;
+  if (!previous) {
+    state = createVideoSession(tabId, {
+      ...context,
+      pageUrl: incomingPageUrl,
+      pageIdentity: incomingIdentity
+    });
+    tabState.set(tabId, state);
+  } else if (mustRotate) {
+    state = rotateVideoSession(tabId, {
+      ...context,
+      pageUrl: incomingPageUrl,
+      pageIdentity: incomingIdentity,
+      forceSessionBoundary: true,
+      resetMetadata: true
+    });
+  } else {
+    state = ensureVideoSession(tabId, {
+      ...context,
+      pageUrl: incomingPageUrl,
+      pageIdentity: incomingIdentity
+    });
+  }
+  state.invalidated = false;
+  state.invalidatedAt = 0;
+  state.pendingPageUrl = "";
+  state.navigationReason = context.reason || "navigation-finish";
+  state.fingerprint = videoFingerprint(state.pageUrl, state.currentSrc);
+  broadcastSessionState("videoSessionChanged", state);
+  return state;
+}
+
+function broadcastSessionState(type, state) {
+  chrome.runtime.sendMessage({
+    type,
+    tabId: state.tabId,
+    sessionId: state.sessionId,
+    pageUrl: state.pageUrl,
+    pageIdentity: state.pageIdentity,
+    videoId: state.videoId
+  }, () => {
+    void chrome.runtime.lastError;
+  });
+}
+
 function updateVideoContext(tabId, context = {}) {
-  const mainVideo = context.mainVideo || {};
+  const metadataMatchesPage = context.metadataMatchesPage !== false;
+  const mainVideo = metadataMatchesPage ? (context.mainVideo || {}) : {};
   const nextCurrentSrc = mainVideo.currentSrc || context.currentSrc || "";
-  const nextPoster = safeImageUrl(context.poster || mainVideo.poster || "");
-  let state = ensureVideoSession(tabId, context);
+  const nextPoster = metadataMatchesPage ? safeImageUrl(context.poster || mainVideo.poster || "") : "";
+  const pageUrl = context.pageUrl || "";
+  const pageIdentity = context.pageIdentity || pageVideoIdentity(pageUrl);
+  let state = ensureVideoSession(tabId, { ...context, pageIdentity, metadataMatchesPage });
+  if (state.invalidated) return state;
   const currentSrcChanged = shouldRotateForCurrentSrc(state.currentSrc, nextCurrentSrc);
   if (currentSrcChanged) {
     state = rotateVideoSession(tabId, {
       ...context,
+      pageIdentity,
+      metadataMatchesPage,
       currentSrc: nextCurrentSrc || state.currentSrc,
       poster: nextPoster,
       reason: "current-src"
@@ -1281,8 +1462,10 @@ function updateVideoContext(tabId, context = {}) {
   const firstMainObservation = Boolean(nextCurrentSrc && !state.currentSrc);
   if (nextCurrentSrc) state.currentSrc = nextCurrentSrc;
   if (firstMainObservation) state.mainVideoObservedAt = Date.now();
-  if (context.pageTitle) state.pageTitle = context.pageTitle;
+  if (context.pageTitle && metadataMatchesPage) state.pageTitle = context.pageTitle;
   if (context.pageUrl) state.pageUrl = context.pageUrl;
+  if (pageIdentity) state.pageIdentity = pageIdentity;
+  if (context.videoId) state.videoId = context.videoId;
   if (nextPoster) {
     state.thumbnailUrl = nextPoster;
     state.mainPoster = nextPoster;
@@ -1299,6 +1482,7 @@ function captureNetworkStream(tabId, url, details = {}) {
   const state = ensureVideoSession(tabId, {
     pageUrl: details.frameId === 0 ? details.documentUrl : ""
   });
+  if (state.invalidated) return;
   if (
     state.pageUrl
     && details.frameId === 0
@@ -1312,6 +1496,7 @@ function captureNetworkStream(tabId, url, details = {}) {
 
 function rememberHeaders(tabId, url, headers) {
   const state = ensureTabState(tabId);
+  if (state.invalidated) return;
   state.headersByUrl.set(headerKey(url), headers);
   while (state.headersByUrl.size > MAX_HEADERS_PER_TAB) {
     const firstKey = state.headersByUrl.keys().next().value;
