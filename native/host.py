@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-HOST_VERSION = "1.1.0"
+HOST_VERSION = "1.2.0-beta.1"
 DEFAULT_OUTPUT_DIR = Path.home() / "Downloads" / "video_downloads"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
 SIDE_EXTENSIONS = IMAGE_EXTENSIONS | {

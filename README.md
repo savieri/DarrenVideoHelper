@@ -6,10 +6,16 @@ Darren Video Helper detects browser-playable non-DRM HLS/MP4 video streams, send
 
 It does not decrypt DRM, bypass paywalls, bypass login, or defeat site access controls. Use it only for videos your browser can already play and that you are allowed to download.
 
+## Current Release Status
+
+`v1.2.0-beta.1` is a prerelease. It fixes YouTube SPA session switching, introduces One Video One Card aggregation, and simplifies the media card. Automated regression tests pass, but the full real-Chrome download matrix in [VALIDATION.md](VALIDATION.md) still requires manual completion. It is not a stable release.
+
+The version is `1.2.0` rather than `1.1.2` because it changes both session lifecycle behavior and the popup's media model/UI. The beta suffix records that real A/B file-content verification is still open.
+
 ## Release Packages
 
 ```text
-DarrenVideoHelper-macOS.zip
+DarrenVideoHelper-macOS-v1.2.0-beta.1.zip
 DarrenVideoHelper-Windows.zip
 ```
 
@@ -27,6 +33,8 @@ Both packages are designed for Chrome Developer Mode loading:
 extension/
   manifest.json
   background.js
+  content.js
+  page-navigation.js
   popup.html
   popup.js
   style.css
@@ -113,18 +121,27 @@ This removes the Native Messaging Host registration. Remove the Chrome extension
 
 ## Features
 
-- Detects `.m3u8`, `.mp4`, `.m4s`, and `.ts` media requests.
-- Isolates candidates by page/player `VideoSession`; navigation or main `currentSrc` changes invalidate old candidates.
-- Recommends direct MP4 or current-session HLS media; PAGE URLs are never treated as real media recommendations.
+- Detects `.m3u8`, `.mp4`, `.m4s`, `.ts`, and YouTube `googlevideo/videoplayback` DASH evidence.
+- Tracks YouTube navigation start/finish events, History API changes, `popstate`, tab/webNavigation updates, and a videoId/location polling fallback.
+- Invalidates the previous selection as soon as navigation starts and creates a new `VideoSession` only when page/video identity really changes.
+- Keeps YouTube MSE `blob:` and poster churn inside the current session.
+- Aggregates resolver, DASH, HLS master/variant, and direct-file evidence into one main `LogicalVideo` card.
+- Shows MP4 output, a per-download quality selector, preview thumbnail, and duration overlay; hovering the preview hides its overlay.
+- Keeps low-level DASH/HLS evidence inside optional advanced details instead of exposing it as extra downloadable videos.
 - Creates an immutable resource snapshot before queueing a native download.
-- Shows thumbnail, source/title, quality, format, estimated size, and duration.
 - Downloads only final MP4 output.
 - Does not save page screenshots as results.
 - Does not write thumbnails, info JSON, descriptions, subtitles, or sidecar files.
 - Shows progress percentage, speed, ETA, final file size, and output path.
 - Supports queue download, pause, resume, cancel, and imported URL lists.
 - Download history uses a resource fingerprint and asks before a forced re-download instead of silently skipping.
-- Includes an Options page for output directory, quality, concurrency, cookies, download-history prompts, MP4-only mode, and advanced candidates.
+- Includes an Options page for output directory, quality, concurrency, cookies, download-history prompts, MP4-only mode, and advanced source details.
+
+The first `v1.2.0` preview implementation uses a stable poster/player thumbnail. The preview container is ready for a later live or sampled-frame implementation; this beta does not claim live preview playback.
+
+## Rollback
+
+To return to the last published stable build, download `DarrenVideoHelper-macOS.zip` from the GitHub `v1.0.0` Release, replace the unpacked extension folder, rerun `install.command`, and reload the extension in Chrome. Do not use the unvalidated `v1.1.0` development state as a stable rollback target.
 
 ## Native Host Command Shape
 
