@@ -114,14 +114,17 @@ This removes the Native Messaging Host registration. Remove the Chrome extension
 ## Features
 
 - Detects `.m3u8`, `.mp4`, `.m4s`, and `.ts` media requests.
-- Recommends the most likely main video first.
+- Isolates candidates by page/player `VideoSession`; navigation or main `currentSrc` changes invalidate old candidates.
+- Recommends direct MP4 or current-session HLS media; PAGE URLs are never treated as real media recommendations.
+- Creates an immutable resource snapshot before queueing a native download.
 - Shows thumbnail, source/title, quality, format, estimated size, and duration.
 - Downloads only final MP4 output.
 - Does not save page screenshots as results.
 - Does not write thumbnails, info JSON, descriptions, subtitles, or sidecar files.
 - Shows progress percentage, speed, ETA, final file size, and output path.
 - Supports queue download, pause, resume, cancel, and imported URL lists.
-- Includes an Options page for output directory, quality, concurrency, cookies, skip history, MP4-only mode, and advanced candidates.
+- Download history uses a resource fingerprint and asks before a forced re-download instead of silently skipping.
+- Includes an Options page for output directory, quality, concurrency, cookies, download-history prompts, MP4-only mode, and advanced candidates.
 
 ## Native Host Command Shape
 
@@ -129,6 +132,7 @@ The native host runs a command equivalent to:
 
 ```bash
 yt-dlp --cookies-from-browser chrome --referer "<current page URL>" \
+  --continue --retries 5 --fragment-retries 8 \
   -f "bv*+ba/best" \
   --merge-output-format mp4 \
   --remux-video mp4 \
@@ -161,5 +165,7 @@ Downloads are marked `Done` only when:
 
 - the final file is `.mp4`
 - `ffprobe` detects at least one video stream
+- file size and duration are valid
+- when the page supplied a reliable duration, the final duration is reasonably close
 
 If a site or URL produces an image, JSON, text, or a non-video file, the native host deletes that output and reports `Failed`.
