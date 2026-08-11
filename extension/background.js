@@ -246,12 +246,7 @@ async function getPopupState(tabId, retryCount = 0) {
   const allSessionStreams = sortedStreams(state)
     .filter((stream) => !isHardExcludedUrl(stream.lastUrl || stream.url));
   const rawStreams = allSessionStreams
-    .filter((stream) => settings.showAdvanced || (
-      stream.kind !== "segment"
-      && stream.kind !== "dash_video"
-      && stream.kind !== "dash_audio"
-      && stream.association !== "secondary-dom"
-    ))
+    .filter((stream) => settings.showAdvanced || stream.kind !== "segment")
     .map(snapshotStream);
   let enrichedStreams = await Promise.all(rawStreams.map((stream) => enrichStreamForPopup(sessionSnapshot, stream)));
 
@@ -262,13 +257,9 @@ async function getPopupState(tabId, retryCount = 0) {
 
   enrichedStreams = linkPlaylistCandidates(enrichedStreams);
   const ranked = rankStreams(makePopupStreams(sessionSnapshot, enrichedStreams), sessionSnapshot);
-  const recommended = ranked.find((stream) => stream.isRecommendable) || null;
-  const streams = ranked
-    .map((stream, index) => ({
-      ...stream,
-      recommended: Boolean(recommended && stream.resourceId === recommended.resourceId),
-      rank: index + 1
-    }));
+  const streams = aggregateLogicalVideos(sessionSnapshot, ranked, settings)
+    .map((stream, index) => ({ ...stream, recommended: index === 0, rank: index + 1 }));
+  const recommended = streams[0] || null;
 
   const hasPageExtractor = Boolean(pageExtractorInfo(sessionSnapshot.pageUrl));
   const hasDetectedVideo = hasPageExtractor || allSessionStreams.some((stream) => stream.kind !== "segment");
@@ -285,9 +276,7 @@ async function getPopupState(tabId, retryCount = 0) {
     pageUrl: sessionSnapshot.pageUrl,
     thumbnailUrl: safeImageUrl(sessionSnapshot.thumbnailUrl),
     streams,
-    recommended: recommended
-      ? streams.find((stream) => stream.resourceId === recommended.resourceId) || null
-      : null,
+    recommended,
     detectedStreamCount: allSessionStreams.length + Number(hasPageExtractor),
     warning,
     settings,
@@ -579,7 +568,9 @@ async function startDownload(tabId, selection, options = {}) {
   const resolved = validateDownloadSelection(state, selection || {});
   if (!resolved.ok) return resolved;
 
-  const payload = buildDownloadPayload(state, resolved.stream, settings);
+  const payload = buildDownloadPayload(state, resolved.stream, settings, {
+    qualityPreference: selection?.qualityPreference || ""
+  });
   return enqueueDownload(payload, settings, options);
 }
 
@@ -657,7 +648,7 @@ function staleSelectionResponse() {
   };
 }
 
-function buildDownloadPayload(state, stream, settings) {
+function buildDownloadPayload(state, stream, settings, options = {}) {
   const pageUrl = state.pageUrl || "";
   const streamUrl = stream.lastUrl || stream.url;
   const usePageExtractor = stream.kind === "page_extractor";
@@ -685,7 +676,7 @@ function buildDownloadPayload(state, stream, settings) {
     referer: headers.referer || pageUrl,
     preferPageUrl: usePageExtractor || stream.kind === "page",
     capturedAt: Date.now(),
-    qualityPreference: settings.defaultQuality,
+    qualityPreference: options.qualityPreference || settings.defaultQuality,
     settings: { ...settings }
   };
   return deepFreeze(payload);
@@ -1186,6 +1177,65 @@ function makePopupStreams(state, detectedStreams) {
   const extractor = makePageExtractorCandidate(state);
   if (extractor) streams.push(extractor);
   return streams;
+}
+
+function aggregateLogicalVideos(state, rankedStreams, settings = {}) {
+  const primary = rankedStreams.find((stream) => stream.canDownloadWholeVideo && stream.isRecommendable);
+  if (!primary) return [];
+
+  const qualityValues = Array.from(new Set(
+    rankedStreams
+      .map((stream) => Number(stream.quality || 0))
+      .filter((quality) => quality > 0)
+  )).sort((left, right) => right - left);
+  const qualityOptions = [{ value: "best", label: "最佳可用" }];
+  for (const quality of qualityValues) {
+    qualityOptions.push({ value: `${quality}p`, label: `${quality}p` });
+  }
+  const defaultQuality = settings.defaultQuality || "best";
+  if (!qualityOptions.some((option) => option.value === defaultQuality)) {
+    qualityOptions.push({ value: defaultQuality, label: defaultQuality });
+  }
+
+  const extractor = pageExtractorInfo(state.pageUrl);
+  const providerLabel = extractor?.provider === "youtube"
+    ? "YouTube"
+    : (getHost(state.pageUrl) || primary.host || "网页视频");
+  const advancedSources = settings.showAdvanced === true
+    ? rankedStreams.map((stream) => ({
+      resourceId: stream.resourceId,
+      sourceKind: stream.kind,
+      typeTag: stream.typeTag,
+      qualityLabel: stream.qualityLabel,
+      label: stream.label,
+      host: stream.host,
+      downloadable: stream.canDownloadWholeVideo === true
+    }))
+    : [];
+
+  return [{
+    ...primary,
+    id: `logical:${state.sessionId}`,
+    logicalVideoId: `logical:${state.pageIdentity || state.fingerprint}`,
+    kind: "logical_video",
+    sourceKind: primary.kind,
+    typeTag: "MP4",
+    formatLabel: "MP4",
+    label: `${providerLabel} · 自动合并为 MP4`,
+    host: providerLabel,
+    sourceTitle: state.pageTitle || primary.sourceTitle || providerLabel,
+    thumbnailUrl: safeImageUrl(state.thumbnailUrl || primary.thumbnailUrl),
+    duration: state.videoDuration || primary.duration || 0,
+    durationLabel: formatDuration(state.videoDuration || primary.duration || 0),
+    quality: primary.quality || state.mainVideoHeight || 0,
+    qualityLabel: primary.qualityLabel || (state.mainVideoHeight ? `${state.mainVideoHeight}p` : "最佳"),
+    qualityOptions,
+    defaultQuality,
+    evidenceCount: rankedStreams.length,
+    advancedSources,
+    canDownloadWholeVideo: true,
+    isRecommendable: true
+  }];
 }
 
 function rankStreams(streams, state) {

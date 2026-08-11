@@ -167,7 +167,7 @@ def build_ytdlp_command(message, target_url, output_dir, output_name):
     headers = message.get("headers") or {}
     settings = message.get("settings") or {}
     auto_cookies = settings.get("autoCookies", True)
-    selected_quality = settings.get("defaultQuality") or message.get("qualityPreference") or "best"
+    selected_quality = message.get("qualityPreference") or settings.get("defaultQuality") or "best"
 
     command = [
         ytdlp,

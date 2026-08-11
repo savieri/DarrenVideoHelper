@@ -42,6 +42,22 @@ class NativeHostTests(unittest.TestCase):
         self.assertEqual(command[referer_index + 1], "https://site.test/request-context")
         self.assertEqual(command[-1], "https://cdn.test/master.m3u8")
 
+    def test_per_card_quality_overrides_the_saved_default(self):
+        message = {
+            "pageUrl": "https://www.youtube.com/watch?v=videoA",
+            "qualityPreference": "1080p",
+            "settings": {"autoCookies": False, "defaultQuality": "720p"},
+        }
+        with mock.patch.object(HOST, "tool_path", side_effect=lambda name: f"/tools/{name}"):
+            command = HOST.build_ytdlp_command(
+                message,
+                message["pageUrl"],
+                Path("/tmp/output"),
+                "video.mp4",
+            )
+        selector_index = command.index("-f")
+        self.assertIn("height<=1080", command[selector_index + 1])
+
     def test_small_output_cannot_be_completed(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "tiny.mp4"

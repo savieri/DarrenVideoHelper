@@ -289,6 +289,80 @@ test("YouTube videoplayback DASH URLs are captured and grouped by media identity
   assert.equal(result.grouped, true);
 });
 
+test("YouTube resolver and DASH evidence aggregate into one logical MP4 video", () => {
+  const { context } = loadBackground();
+  const result = evaluate(context, `(() => {
+    const state = createVideoSession(24, {
+      pageUrl: "https://www.youtube.com/watch?v=videoA",
+      pageIdentity: "youtube:videoA",
+      pageTitle: "Video A"
+    });
+    state.mainVideoHeight = 720;
+    const extractor = makePageExtractorCandidate(snapshotVideoSession(state));
+    const dashVideo = {
+      resourceId: "dash-video", kind: "dash_video", typeTag: "DASH-V",
+      quality: 1080, qualityLabel: "1080p", canDownloadWholeVideo: false,
+      isRecommendable: false, lastSeen: Date.now(), firstSeen: Date.now(),
+      url: "https://r1.googlevideo.com/videoplayback?id=videoA&itag=137",
+      host: "r1.googlevideo.com"
+    };
+    const dashAudio = {
+      resourceId: "dash-audio", kind: "dash_audio", typeTag: "DASH-A",
+      quality: 0, qualityLabel: "Auto", canDownloadWholeVideo: false,
+      isRecommendable: false, lastSeen: Date.now(), firstSeen: Date.now(),
+      url: "https://r1.googlevideo.com/videoplayback?id=videoA&itag=140",
+      host: "r1.googlevideo.com"
+    };
+    const cards = aggregateLogicalVideos(
+      snapshotVideoSession(state),
+      rankStreams([extractor, dashVideo, dashAudio], state),
+      { defaultQuality: "best", showAdvanced: true }
+    );
+    return {
+      count: cards.length,
+      kind: cards[0].kind,
+      sourceKind: cards[0].sourceKind,
+      typeTag: cards[0].typeTag,
+      resourceId: cards[0].resourceId,
+      evidenceCount: cards[0].evidenceCount,
+      advancedKinds: cards[0].advancedSources.map((source) => source.sourceKind),
+      qualityValues: cards[0].qualityOptions.map((option) => option.value)
+    };
+  })()`);
+  assert.equal(result.count, 1);
+  assert.equal(result.kind, "logical_video");
+  assert.equal(result.sourceKind, "page_extractor");
+  assert.equal(result.typeTag, "MP4");
+  assert.match(result.resourceId, /^__page_extractor__:/);
+  assert.equal(result.evidenceCount, 3);
+  assert.deepEqual(Array.from(result.advancedKinds).sort(), ["dash_audio", "dash_video", "page_extractor"]);
+  assert.deepEqual(Array.from(result.qualityValues), ["best", "1080p", "720p"]);
+});
+
+test("HLS master and variants aggregate into one main-video card", () => {
+  const { context } = loadBackground();
+  const result = evaluate(context, `(() => {
+    const state = createVideoSession(25, { pageUrl: "https://site.test/watch", pageTitle: "Main" });
+    const master = {
+      resourceId: "master", kind: "hls_master", typeTag: "HLS", quality: 1080,
+      qualityLabel: "1080p", canDownloadWholeVideo: true, isRecommendable: true,
+      stronglyAssociated: true, capturedAfterMain: true, lastSeen: Date.now(), firstSeen: Date.now(),
+      duration: 600, url: "https://cdn.test/master.m3u8", host: "cdn.test"
+    };
+    const variant = {
+      resourceId: "variant", kind: "hls_media", typeTag: "HLS", quality: 720,
+      qualityLabel: "720p", canDownloadWholeVideo: true, isRecommendable: true,
+      parentMasterId: "master", lastSeen: Date.now(), firstSeen: Date.now(),
+      duration: 600, url: "https://cdn.test/720.m3u8", host: "cdn.test"
+    };
+    return aggregateLogicalVideos(state, rankStreams([master, variant], state), { defaultQuality: "720p" });
+  })()`);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].typeTag, "MP4");
+  assert.equal(result[0].resourceId, "master");
+  assert.equal(result[0].defaultQuality, "720p");
+});
+
 test("stale popup selection cannot resolve against a new session", () => {
   const { context } = loadBackground();
   const result = evaluate(context, `(() => {
