@@ -270,6 +270,45 @@ test("stale YouTube metadata cannot repopulate a newly committed video", () => {
   assert.equal(result.freshDuration, 900);
 });
 
+test("same YouTube video navigation briefly stales but does not rotate its session", () => {
+  const { context } = loadBackground();
+  const result = evaluate(context, `(() => {
+    const state = commitVideoNavigation(26, {
+      pageUrl: "https://www.youtube.com/watch?v=videoA",
+      pageIdentity: "youtube:videoA",
+      videoId: "videoA"
+    });
+    upsertStream(26, "https://r1.googlevideo.com/videoplayback?id=videoA&itag=137&mime=video%2Fmp4", { source: "network" });
+    const firstId = state.sessionId;
+    const streamCount = state.streams.size;
+    invalidateVideoSession(26, {
+      pageUrl: "https://www.youtube.com/watch?v=videoA&list=playlist",
+      pageIdentity: "youtube:videoA",
+      reason: "history.replaceState"
+    });
+    const invalidated = state.invalidated;
+    const committed = commitVideoNavigation(26, {
+      pageUrl: "https://www.youtube.com/watch?v=videoA&list=playlist",
+      pageIdentity: "youtube:videoA",
+      videoId: "videoA",
+      reason: "history.replaceState"
+    });
+    return {
+      firstId,
+      committedId: committed.sessionId,
+      invalidated,
+      active: !committed.invalidated,
+      beforeStreams: streamCount,
+      afterStreams: committed.streams.size
+    };
+  })()`);
+  assert.equal(result.invalidated, true);
+  assert.equal(result.active, true);
+  assert.equal(result.firstId, result.committedId);
+  assert.equal(result.beforeStreams, 1);
+  assert.equal(result.afterStreams, 1);
+});
+
 test("YouTube videoplayback DASH URLs are captured and grouped by media identity", () => {
   const { context } = loadBackground();
   const result = evaluate(context, `(() => {

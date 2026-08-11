@@ -1422,9 +1422,6 @@ function invalidateVideoSession(tabId, context = {}) {
   state.invalidatedAt = Date.now();
   state.pendingPageUrl = context.pageUrl || "";
   state.navigationReason = context.reason || "navigation-start";
-  state.streams.clear();
-  state.headersByUrl.clear();
-  state.thumbnailUrl = "";
   state.fingerprint = stableFingerprint(`${state.sessionId}|invalidated|${state.invalidatedAt}`);
   broadcastSessionState("videoSessionInvalidated", state);
   return state;
@@ -1439,8 +1436,7 @@ function commitVideoNavigation(tabId, context = {}) {
   );
   const mustRotate = Boolean(
     previous && (
-      previous.invalidated
-      || identityChanged
+      identityChanged
       || context.forceDocumentBoundary === true
     )
   );

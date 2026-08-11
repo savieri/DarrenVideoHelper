@@ -16,7 +16,7 @@
       href,
       previousHref,
       at: Date.now()
-    }, location.origin);
+    }, location.origin === "null" ? "*" : location.origin);
     lastHref = href;
   }
 
