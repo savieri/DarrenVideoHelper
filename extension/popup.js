@@ -8,8 +8,6 @@ const noticeEl = document.getElementById("notice");
 const streamsEl = document.getElementById("streams");
 const refreshButton = document.getElementById("refreshButton");
 const optionsButton = document.getElementById("optionsButton");
-const reloadExtensionButton = document.getElementById("reloadExtensionButton");
-const downloadRecommendedButton = document.getElementById("downloadRecommendedButton");
 const pauseQueueButton = document.getElementById("pauseQueueButton");
 const resumeQueueButton = document.getElementById("resumeQueueButton");
 const importFileEl = document.getElementById("importFile");
@@ -20,8 +18,6 @@ const queueStateEl = document.getElementById("queueState");
 document.addEventListener("DOMContentLoaded", init);
 refreshButton.addEventListener("click", loadStreams);
 optionsButton.addEventListener("click", () => chrome.runtime.openOptionsPage());
-reloadExtensionButton.addEventListener("click", () => sendMessage({ type: "reloadExtension" }));
-downloadRecommendedButton.addEventListener("click", downloadRecommended);
 pauseQueueButton.addEventListener("click", async () => {
   await sendMessage({ type: "pauseQueue" });
   await refreshJobs();
@@ -88,12 +84,11 @@ async function loadStreams() {
 
 function renderStreams(streams) {
   streamsEl.innerHTML = "";
-  downloadRecommendedButton.disabled = !currentState?.recommended;
 
   if (!streams.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "没检测到视频";
+    empty.textContent = currentState?.navigating ? "正在切换视频…" : "没检测到视频";
     streamsEl.appendChild(empty);
     return;
   }
@@ -107,18 +102,33 @@ function renderStreams(streams) {
     ].filter(Boolean).join(" ");
     card.dataset.streamId = stream.id;
 
-    const thumb = document.createElement("div");
-    thumb.className = "thumb";
+    const preview = document.createElement("div");
+    preview.className = "media-preview";
+    preview.dataset.previewMode = "poster";
     if (stream.thumbnailUrl) {
       const img = document.createElement("img");
       img.src = stream.thumbnailUrl;
       img.alt = "";
       img.loading = "lazy";
-      thumb.appendChild(img);
+      preview.appendChild(img);
     } else {
-      thumb.textContent = stream.typeTag || "MP4";
+      const placeholder = document.createElement("span");
+      placeholder.className = "preview-placeholder";
+      placeholder.textContent = "▶";
+      preview.appendChild(placeholder);
     }
-    card.appendChild(thumb);
+    const previewOverlay = document.createElement("div");
+    previewOverlay.className = "preview-overlay";
+    const formatPill = document.createElement("span");
+    formatPill.className = "preview-format";
+    formatPill.textContent = stream.formatLabel || "MP4";
+    previewOverlay.appendChild(formatPill);
+    const duration = document.createElement("span");
+    duration.className = "preview-duration";
+    duration.textContent = stream.durationLabel || "--:--";
+    previewOverlay.appendChild(duration);
+    preview.appendChild(previewOverlay);
+    card.appendChild(preview);
 
     const body = document.createElement("div");
     body.className = "stream-body";
@@ -126,92 +136,82 @@ function renderStreams(streams) {
     const titleRow = document.createElement("div");
     titleRow.className = "stream-title-row";
     const title = document.createElement("h2");
-    title.textContent = stream.recommended
-      ? `${stream.sourceTitle || stream.host || "Video"}`
-      : (stream.sourceTitle || stream.host || "Detected video");
+    title.textContent = stream.sourceTitle || stream.host || "Detected video";
     titleRow.appendChild(title);
-    if (stream.recommended) titleRow.appendChild(makeBadge("推荐", "recommend"));
     body.appendChild(titleRow);
-
-    const meta = document.createElement("div");
-    meta.className = "meta-grid";
-    meta.appendChild(makeMeta(stream.qualityLabel || "Auto", "清晰度"));
-    meta.appendChild(makeMeta(stream.typeTag || "VIDEO", "格式"));
-    meta.appendChild(makeMeta(stream.sizeLabel || "约 -- MB", "大小"));
-    meta.appendChild(makeMeta(stream.durationLabel || "--:--", "时长"));
-    body.appendChild(meta);
 
     const source = document.createElement("p");
     source.className = "source";
-    source.textContent = stream.host || stream.label || "";
+    source.textContent = `${stream.host || "网页视频"} · ${stream.sizeLabel || "大小未知"}`;
     body.appendChild(source);
 
     const actions = document.createElement("div");
     actions.className = "actions";
 
-    const copyButton = document.createElement("button");
-    copyButton.type = "button";
-    copyButton.className = "small";
-    copyButton.textContent = "Copy URL";
-    copyButton.addEventListener("click", async () => {
-      await navigator.clipboard.writeText(stream.lastUrl || stream.url);
-      copyButton.textContent = "Copied";
-      window.setTimeout(() => { copyButton.textContent = "Copy URL"; }, 1200);
-    });
-    actions.appendChild(copyButton);
+    const formatBadge = makeBadge(stream.formatLabel || "MP4", "format");
+    actions.appendChild(formatBadge);
+
+    const qualitySelect = document.createElement("select");
+    qualitySelect.className = "quality-select";
+    qualitySelect.setAttribute("aria-label", "选择清晰度");
+    for (const quality of stream.qualityOptions || [{ value: "best", label: "最佳可用" }]) {
+      const option = document.createElement("option");
+      option.value = quality.value;
+      option.textContent = quality.label;
+      option.selected = quality.value === (stream.defaultQuality || "best");
+      qualitySelect.appendChild(option);
+    }
+    actions.appendChild(qualitySelect);
 
     const downloadButton = document.createElement("button");
     downloadButton.type = "button";
-    downloadButton.className = "primary small";
-    downloadButton.textContent = "Download MP4";
+    downloadButton.className = "primary download-button";
+    downloadButton.textContent = "下载";
     downloadButton.disabled = !stream.canDownloadWholeVideo;
-    downloadButton.addEventListener("click", () => downloadStream(stream, downloadButton));
+    downloadButton.addEventListener("click", () => downloadStream(stream, downloadButton, qualitySelect.value));
     actions.appendChild(downloadButton);
 
     body.appendChild(actions);
+    if (stream.advancedSources?.length) {
+      const details = document.createElement("details");
+      details.className = "source-details";
+      const summary = document.createElement("summary");
+      summary.textContent = `内部来源 ${stream.evidenceCount || stream.advancedSources.length}`;
+      details.appendChild(summary);
+      const list = document.createElement("ul");
+      for (const sourceItem of stream.advancedSources) {
+        const item = document.createElement("li");
+        item.textContent = [sourceItem.typeTag, sourceItem.qualityLabel, sourceItem.label]
+          .filter(Boolean)
+          .join(" · ");
+        list.appendChild(item);
+      }
+      details.appendChild(list);
+      body.appendChild(details);
+    }
     card.appendChild(body);
     streamsEl.appendChild(card);
   }
 }
 
-async function downloadStream(stream, button) {
+async function downloadStream(stream, button, qualityPreference = "best") {
   button.disabled = true;
-  button.textContent = "Queued";
+  button.textContent = "已加入";
   try {
-    let response = await requestDownload("download", stream, false);
+    let response = await requestDownload("download", stream, false, qualityPreference);
     if (response.duplicate && window.confirm(`${response.error}\n\n是否强制重新下载？`)) {
-      response = await requestDownload("download", stream, true);
+      response = await requestDownload("download", stream, true, qualityPreference);
     }
     if (!response.ok) throw new Error(response.error || "Download failed to start.");
     await refreshJobs();
   } catch (error) {
     showNotice(error.message || String(error), "error");
     button.disabled = false;
-    button.textContent = "Download MP4";
+    button.textContent = "下载";
   }
 }
 
-async function downloadRecommended() {
-  downloadRecommendedButton.disabled = true;
-  downloadRecommendedButton.textContent = "Queued";
-  try {
-    const stream = currentState?.recommended;
-    if (!stream) throw new Error("当前没有可推荐的真实媒体资源。");
-    let response = await requestDownload("downloadRecommended", stream, false);
-    if (response.duplicate && window.confirm(`${response.error}\n\n是否强制重新下载？`)) {
-      response = await requestDownload("downloadRecommended", stream, true);
-    }
-    if (!response.ok) throw new Error(response.error || "Download failed to start.");
-    await refreshJobs();
-  } catch (error) {
-    showNotice(error.message || String(error), "error");
-  } finally {
-    downloadRecommendedButton.disabled = false;
-    downloadRecommendedButton.textContent = "下载推荐";
-  }
-}
-
-function requestDownload(type, stream, forceRedownload) {
+function requestDownload(type, stream, forceRedownload, qualityPreference = "best") {
   return sendMessage({
     type,
     tabId: currentTabId,
@@ -221,7 +221,8 @@ function requestDownload(type, stream, forceRedownload) {
       resourceId: stream.resourceId || stream.id,
       resourceUrl: stream.resourceUrl || stream.lastUrl || stream.url,
       pageUrl: stream.pageUrl || currentState?.pageUrl || "",
-      fingerprint: stream.fingerprint
+      fingerprint: stream.fingerprint,
+      qualityPreference
     }
   });
 }
