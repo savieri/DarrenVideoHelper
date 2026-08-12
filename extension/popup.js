@@ -204,6 +204,11 @@ async function downloadStream(stream, button, qualityPreference = "best") {
     }
     if (!response.ok) throw new Error(response.error || "Download failed to start.");
     await refreshJobs();
+    if (response.activeDuplicate) {
+      button.textContent = "下载中";
+      showNotice(response.message || "这个视频已在下载中。", "muted");
+      focusJob(response.jobId);
+    }
   } catch (error) {
     showNotice(error.message || String(error), "error");
     button.disabled = false;
@@ -265,6 +270,8 @@ function renderJobs() {
   for (const job of jobs) {
     const item = document.createElement("div");
     item.className = `job ${job.status || "running"}`;
+    item.dataset.jobId = job.id;
+    item.tabIndex = -1;
 
     const top = document.createElement("div");
     top.className = "job-top";
@@ -318,6 +325,14 @@ function renderJobs() {
 
     jobListEl.appendChild(item);
   }
+}
+
+function focusJob(jobId) {
+  const item = Array.from(jobListEl.querySelectorAll(".job"))
+    .find((candidate) => candidate.dataset.jobId === jobId);
+  if (!item) return;
+  item.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  item.focus({ preventScroll: true });
 }
 
 function makeMeta(value, label) {

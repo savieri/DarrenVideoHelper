@@ -539,3 +539,59 @@ test("download history matches only the completed resource fingerprint", async (
   assert.equal(same.fingerprint, "fp:one");
   assert.equal(other, null);
 });
+
+test("an active resource is reused even when force redownload is requested", async () => {
+  const { context } = loadBackground();
+  const result = await evaluate(context, `(async () => {
+    const payload = {
+      action: "download",
+      url: "https://cdn.test/video.m3u8",
+      pageUrl: "https://site.test/watch",
+      sourceTitle: "Video",
+      sessionId: "session:one",
+      resourceId: "resource:one",
+      fingerprint: "fingerprint:one"
+    };
+    const settings = { skipDownloaded: false };
+    const first = await enqueueDownload(payload, settings, { quiet: true });
+    const second = await enqueueDownload(payload, settings, { quiet: true, forceRedownload: true });
+    return { first, second, jobCount: jobs.size };
+  })()`);
+  assert.equal(result.first.ok, true);
+  assert.equal(result.second.ok, true);
+  assert.equal(result.second.activeDuplicate, true);
+  assert.equal(result.second.jobId, result.first.jobId);
+  assert.equal(result.jobCount, 1);
+});
+
+test("native host exits are converted to a readable diagnostic", () => {
+  const { context } = loadBackground();
+  const result = evaluate(context, `readableNativeDisconnectError("Native host has exited.")`);
+  assert.match(result, /本地助手意外退出/);
+});
+
+test("a disconnected native port fails the active job instead of leaving Starting", async () => {
+  const { context } = loadBackground();
+  const result = await evaluate(context, `(async () => {
+    const payload = {
+      action: "download", url: "https://cdn.test/video.m3u8",
+      pageUrl: "https://site.test/watch", sourceTitle: "Video",
+      sessionId: "session:disconnect", resourceId: "resource:disconnect",
+      fingerprint: "fingerprint:disconnect"
+    };
+    const created = await enqueueDownload(payload, { skipDownloaded: false }, { quiet: true });
+    const onMessage = { listener: null, addListener(listener) { this.listener = listener; } };
+    const onDisconnect = { listener: null, addListener(listener) { this.listener = listener; } };
+    const port = { onMessage, onDisconnect, postMessage() {}, disconnect() {} };
+    chrome.runtime.connectNative = () => port;
+    startNativeJob(jobs.get(created.jobId), { outputDir: "~/Downloads/video_downloads" });
+    chrome.runtime.lastError = { message: "Native host has exited." };
+    onDisconnect.listener();
+    const job = jobs.get(created.jobId);
+    return { status: job.status, message: job.message, details: job.details, running: runningPorts.size };
+  })()`);
+  assert.equal(result.status, "failed");
+  assert.match(result.message, /本地助手意外退出/);
+  assert.match(result.details, /native-host\.log/);
+  assert.equal(result.running, 0);
+});

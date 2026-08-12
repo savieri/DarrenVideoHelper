@@ -6,6 +6,9 @@ const BAD_CANDIDATE_PATTERN = /(?:thumbnail|thumb|sprite|preview|avatar|profile|
 const MAX_STREAMS_PER_TAB = 100;
 const MAX_HEADERS_PER_TAB = 140;
 const MAX_LOG_LINES = 140;
+const NATIVE_START_TIMEOUT_MS = 20 * 1000;
+const NATIVE_HOST_LOG_PATH = "~/Library/Logs/DarrenVideoHelper/native-host.log";
+const ACTIVE_JOB_STATUSES = new Set(["queued", "downloading", "merging"]);
 const SESSION_ENRICH_RETRIES = 1;
 const RECENT_MAIN_MEDIA_WINDOW_MS = 90 * 1000;
 const DEFAULT_SETTINGS = {
@@ -683,6 +686,17 @@ function buildDownloadPayload(state, stream, settings, options = {}) {
 }
 
 async function enqueueDownload(payload, settings, options = {}) {
+  const activeJob = findActiveJob(payload);
+  if (activeJob) {
+    return {
+      ok: true,
+      activeDuplicate: true,
+      reused: true,
+      jobId: activeJob.id,
+      message: "这个视频已在下载中，已复用现有任务。",
+      job: publicJob(activeJob)
+    };
+  }
   const duplicate = settings.skipDownloaded ? await findDownloadedHistory(payload) : null;
   if (duplicate && options.forceRedownload !== true) {
     return {
@@ -744,6 +758,11 @@ async function processQueue() {
 
 function startNativeJob(job, settings) {
   let port;
+  let startTimer = null;
+  const clearStartTimer = () => {
+    if (startTimer) clearTimeout(startTimer);
+    startTimer = null;
+  };
   updateJob(job.id, {
     status: "downloading",
     message: "Starting native download...",
@@ -755,19 +774,36 @@ function startNativeJob(job, settings) {
   try {
     port = chrome.runtime.connectNative(HOST_NAME);
   } catch (error) {
+    const rawMessage = error?.message || String(error);
+    const message = readableNativeDisconnectError(rawMessage);
     updateJob(job.id, {
       status: "failed",
-      error: error.message || String(error),
-      message: "本地助手无法启动。请先运行 native/install_host.sh 注册 Native Messaging Host。"
+      error: message,
+      details: `${message}\nChrome: ${rawMessage}\nNative host log: ${NATIVE_HOST_LOG_PATH}`,
+      message
     });
     processQueue();
     return;
   }
 
   runningPorts.set(job.id, port);
+  startTimer = setTimeout(() => {
+    const current = jobs.get(job.id);
+    if (!current || !["downloading", "merging"].includes(current.status)) return;
+    runningPorts.delete(job.id);
+    updateJob(job.id, {
+      status: "failed",
+      error: "本地助手启动超时。",
+      details: `Chrome 已连接，但 ${NATIVE_START_TIMEOUT_MS / 1000} 秒内没有收到任何响应。\nNative host log: ${NATIVE_HOST_LOG_PATH}`,
+      message: "本地助手启动超时，任务已停止。"
+    });
+    safeDisconnect(port);
+    processQueue();
+  }, NATIVE_START_TIMEOUT_MS);
 
   port.onMessage.addListener((message) => {
     if (!message || message.jobId !== job.id) return;
+    clearStartTimer();
 
     if (message.type === "progress") {
       const currentStatus = jobs.get(job.id)?.status;
@@ -815,17 +851,19 @@ function startNativeJob(job, settings) {
   });
 
   port.onDisconnect.addListener(() => {
+    clearStartTimer();
     runningPorts.delete(job.id);
     const current = jobs.get(job.id);
     if (!current || ["completed", "failed", "cancelled"].includes(current.status)) {
       processQueue();
       return;
     }
-    const message = chrome.runtime.lastError?.message || "Native host disconnected before finishing.";
+    const rawMessage = chrome.runtime.lastError?.message || "Native host disconnected before finishing.";
+    const message = readableNativeDisconnectError(rawMessage);
     updateJob(job.id, {
       status: "failed",
       error: message,
-      details: message,
+      details: `${message}\nChrome: ${rawMessage}\nNative host log: ${NATIVE_HOST_LOG_PATH}`,
       message
     });
     processQueue();
@@ -839,7 +877,39 @@ function startNativeJob(job, settings) {
       outputDir: settings.outputDir || DEFAULT_SETTINGS.outputDir
     }
   };
-  port.postMessage(nativePayload);
+  try {
+    port.postMessage(nativePayload);
+  } catch (error) {
+    clearStartTimer();
+    runningPorts.delete(job.id);
+    const rawMessage = error?.message || String(error);
+    const message = readableNativeDisconnectError(rawMessage);
+    updateJob(job.id, {
+      status: "failed",
+      error: message,
+      details: `${message}\nChrome: ${rawMessage}\nNative host log: ${NATIVE_HOST_LOG_PATH}`,
+      message
+    });
+    safeDisconnect(port);
+    processQueue();
+  }
+}
+
+function readableNativeDisconnectError(rawMessage) {
+  const value = String(rawMessage || "");
+  if (/native host has exited/i.test(value)) {
+    return "本地助手意外退出，任务已停止。请展开错误详情查看日志位置。";
+  }
+  if (/specified native messaging host not found/i.test(value)) {
+    return "本地助手未注册或注册路径无效。";
+  }
+  if (/access to the specified native messaging host is forbidden/i.test(value)) {
+    return "扩展 ID 与本地助手授权不匹配。";
+  }
+  if (/error when communicating|disconnected before finishing/i.test(value)) {
+    return "Chrome 无法与本地助手继续通信，任务已停止。";
+  }
+  return value || "本地助手在下载完成前断开，任务已停止。";
 }
 
 function cancelJob(jobId) {
@@ -971,6 +1041,25 @@ async function findDownloadedHistory(payload) {
     && item.fingerprint
     && item.fingerprint === payload.fingerprint
   )) || null;
+}
+
+function findActiveJob(payload) {
+  for (const job of jobs.values()) {
+    if (!ACTIVE_JOB_STATUSES.has(job.status)) continue;
+    const fingerprintMatches = Boolean(
+      payload.fingerprint
+      && job.fingerprint
+      && payload.fingerprint === job.fingerprint
+    );
+    const bindingMatches = Boolean(
+      payload.sessionId
+      && payload.resourceId
+      && payload.sessionId === job.sessionId
+      && payload.resourceId === job.resourceId
+    );
+    if (fingerprintMatches || bindingMatches) return job;
+  }
+  return null;
 }
 
 function snapshotVideoSession(state) {
