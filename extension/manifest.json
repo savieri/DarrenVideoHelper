@@ -4,7 +4,7 @@
   "short_name": "Video Helper",
   "description": "Universal Web Video Downloader for browser-playable non-DRM HLS/MP4 video.",
   "version": "1.2.0",
-  "version_name": "1.2.0-beta.1",
+  "version_name": "1.2.0-beta.2",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApWa0owsnSiltR8LQsRiNQQ8PjcIrM9kb6KmHP5OAPJy29hp45wzovdfLyZkjn8l3vqbM6LXCNbY15uYK6ouMxDhq5m0JJBDBryajcZtTzSuaqOL7TO9Ag4u8PHcHVoA6C4a1HHTnmahP9Ps64wIfumyuPdZyFlFiQg8qWWRQ8Wc53DEtP/P9AhQaosfAoNWR3yJQQ1t4EWEYkP1Fsum1ezsDgVbKFT3v1uhTUhQal0a9vmTVXxvNP/i3T2kKCYQJwWNQ8Lqaay+1ryvNm+6lICSeDq6pnTRDmWVxnhbyplKDiVwFiCBRpA+GVdFy5G4JIel8MvGWMHb1CchNQqrs8QIDAQAB",
   "minimum_chrome_version": "114",
   "permissions": [

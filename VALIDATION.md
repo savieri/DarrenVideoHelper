@@ -4,16 +4,17 @@
 
 | Area | Result | Scope |
 | --- | --- | --- |
-| Background/session/media tests | PASS (18/18) | Session rotation, navigation invalidation, same-video stability, stale metadata/selection rejection, YouTube DASH grouping, LogicalVideo aggregation, HLS ranking, immutable payloads, history fingerprinting |
-| Native-host tests | PASS (7/7) | Retry bounds, headers, per-card quality override, output size/duration validation, HLS fallback restriction |
+| Background/session/media/queue tests | PASS (21/21) | Session rotation, navigation invalidation, same-video stability, stale metadata/selection rejection, YouTube DASH grouping, LogicalVideo aggregation, HLS ranking, immutable payloads, active-job reuse, disconnect cleanup |
+| Native-host tests | PASS (8/8) | Multi-message port lifecycle, retry bounds, headers, per-card quality override, output size/duration validation, HLS fallback restriction |
 | JavaScript syntax | PASS | background, content, page navigation, popup |
-| Chrome/Browser installation diagnostics | PASS | Chrome running; Browser extension installed and enabled; its native-host manifest valid |
+| Packaged native host registration | PASS | Manifest path points to beta.2; extension ID/allowed origin match; arm64 executable; no quarantine; self-test and two-frame ping pass |
+| YouTube framed host E2E | PASS | `YXUhLbV8Nrg`; continuous progress then complete; H.264 + AAC stereo; 4373.316s; 121,966,560 bytes; mid-file decode passed |
 
 These checks are regression coverage, not end-to-end acceptance.
 
 ## Real Chrome status
 
-The automation session could list the user's real Chrome tabs and detected the open YouTube page. Browser security policy blocked opening or inspecting the extension popup directly. Attempts to control the YouTube tab timed out even though installation diagnostics passed. No stable-release claim is made from this run.
+The installed extension path and native manifest were located automatically. The loaded extension directory was updated to beta.2, and the native manifest now targets the packaged beta.2 host. Chrome control could list the real YouTube and extensions tabs, but controlling the YouTube tab and inspecting the extension popup timed out. The E2E therefore used the exact registered manifest and packaged binary with Chrome-compatible stdio framing and the real URL from the open YouTube tab. No stable-release claim is made from this run.
 
 ## Required manual release gate
 

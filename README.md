@@ -8,14 +8,14 @@ It does not decrypt DRM, bypass paywalls, bypass login, or defeat site access co
 
 ## Current Release Status
 
-`v1.2.0-beta.1` is a prerelease. It fixes YouTube SPA session switching, introduces One Video One Card aggregation, and simplifies the media card. Automated regression tests pass, but the full real-Chrome download matrix in [VALIDATION.md](VALIDATION.md) still requires manual completion. It is not a stable release.
+`v1.2.0-beta.2` is a prerelease. It fixes the real Native Messaging lifecycle failure exposed by beta.1, prevents duplicate active jobs, and adds persistent host diagnostics. Automated regression tests and a real framed YouTube download pass, but the full real-Chrome popup matrix in [VALIDATION.md](VALIDATION.md) still requires manual completion. It is not a stable release.
 
 The version is `1.2.0` rather than `1.1.2` because it changes both session lifecycle behavior and the popup's media model/UI. The beta suffix records that real A/B file-content verification is still open.
 
 ## Release Packages
 
 ```text
-DarrenVideoHelper-macOS-v1.2.0-beta.1.zip
+DarrenVideoHelper-macOS-v1.2.0-beta.2.zip
 DarrenVideoHelper-Windows.zip
 ```
 
@@ -135,6 +135,9 @@ This removes the Native Messaging Host registration. Remove the Chrome extension
 - Shows progress percentage, speed, ETA, final file size, and output path.
 - Supports queue download, pause, resume, cancel, and imported URL lists.
 - Download history uses a resource fingerprint and asks before a forced re-download instead of silently skipping.
+- Reuses an existing queued/downloading/merging job when the same resource is clicked again.
+- Fails a native job after a bounded startup timeout or disconnect instead of leaving it at `Starting native download...`.
+- Writes native host startup, job, command, process, traceback, completion, and exit diagnostics to `~/Library/Logs/DarrenVideoHelper/native-host.log`.
 - Includes an Options page for output directory, quality, concurrency, cookies, download-history prompts, MP4-only mode, and advanced source details.
 
 The first `v1.2.0` preview implementation uses a stable poster/player thumbnail. The preview container is ready for a later live or sampled-frame implementation; this beta does not claim live preview playback.
