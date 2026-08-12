@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import logging
 import os
 import re
 import shutil
@@ -8,10 +9,12 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from logging.handlers import RotatingFileHandler
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 HOST_VERSION = "1.2.0-beta.1"
 DEFAULT_OUTPUT_DIR = Path.home() / "Downloads" / "video_downloads"
+LOG_PATH = Path.home() / "Library" / "Logs" / "DarrenVideoHelper" / "native-host.log"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
 SIDE_EXTENSIONS = IMAGE_EXTENSIONS | {
     ".description",
@@ -22,6 +25,46 @@ SIDE_EXTENSIONS = IMAGE_EXTENSIONS | {
     ".vtt",
     ".srt",
 }
+LOGGER = logging.getLogger("DarrenVideoHelper.native")
+
+
+def setup_logging():
+    if LOGGER.handlers:
+        return
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(LOG_PATH, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        LOGGER.addHandler(handler)
+        LOGGER.setLevel(logging.INFO)
+        LOGGER.propagate = False
+    except OSError:
+        LOGGER.addHandler(logging.NullHandler())
+
+
+def redacted_url(value):
+    try:
+        parsed = urlsplit(str(value))
+        if parsed.scheme not in ("http", "https"):
+            return str(value)
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    except (TypeError, ValueError):
+        return "<invalid-url>"
+
+
+def redacted_command(command):
+    result = []
+    redact_next = False
+    for value in command:
+        text = str(value)
+        if redact_next:
+            result.append("<redacted>")
+            redact_next = False
+            continue
+        result.append(redacted_url(text) if text.startswith(("http://", "https://")) else text)
+        if text in ("--add-header", "--cookies", "--cookies-from-browser"):
+            redact_next = True
+    return result
 
 
 def app_dir():
@@ -74,6 +117,12 @@ def send_message(payload):
         raise NativePipeClosed(str(error))
 
 
+def diagnostic_details(details=""):
+    items = [str(details).strip()] if details else []
+    items.append(f"Native host log: {LOG_PATH}")
+    return "\n".join(item for item in items if item)
+
+
 def progress(job_id, message, percent=None, speed="", eta="", line="", stage="downloading"):
     payload = {
         "type": "progress",
@@ -111,7 +160,7 @@ def fail(job_id, message, reason="", details=""):
         "jobId": job_id,
         "message": message,
         "error": reason or message,
-        "details": details or reason or message,
+        "details": diagnostic_details(details or reason or message),
     })
 
 
@@ -444,6 +493,7 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
     process = None
 
     try:
+        LOGGER.info("job=%s yt-dlp command=%s", job_id, json.dumps(redacted_command(command), ensure_ascii=False))
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -451,6 +501,7 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
             text=True,
             errors="replace",
         )
+        LOGGER.info("job=%s yt-dlp started pid=%s", job_id, process.pid)
 
         assert process.stdout is not None
         for line in process.stdout:
@@ -486,7 +537,9 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
                 )
 
         return_code = process.wait()
+        LOGGER.info("job=%s yt-dlp exited code=%s", job_id, return_code)
     except NativePipeClosed:
+        LOGGER.warning("job=%s native pipe closed while yt-dlp was running", job_id)
         if process and process.poll() is None:
             process.terminate()
             try:
@@ -560,6 +613,14 @@ def run_download(message):
     settings = message.get("settings") or {}
     output_dir = Path(os.path.expanduser(settings.get("outputDir") or message.get("outputDir") or DEFAULT_OUTPUT_DIR))
     output_dir.mkdir(parents=True, exist_ok=True)
+    LOGGER.info(
+        "job=%s download start kind=%s page=%s resource=%s output=%s",
+        job_id,
+        message.get("kind") or "",
+        redacted_url(message.get("pageUrl") or ""),
+        redacted_url(message.get("url") or ""),
+        output_dir,
+    )
 
     page_title = message.get("pageTitle") or message.get("sourceTitle") or "video"
     stem = sanitize_filename(page_title)
@@ -623,9 +684,60 @@ def run_download(message):
     )
     cleanup_sidecars(output_dir, used_stems, first_started_at, keep_path=output_path)
     complete(job_id, output_path, probe)
+    LOGGER.info("job=%s completed output=%s size=%s", job_id, output_path, probe.get("fileSize", 0))
+
+
+def handle_message(message):
+    job_id = message.get("jobId") or "job"
+    action = message.get("action")
+    LOGGER.info("received action=%s job=%s", action or "", job_id)
+    try:
+        if action == "ping":
+            send_message({
+                "type": "pong",
+                "jobId": job_id,
+                "ok": True,
+                "version": HOST_VERSION,
+                "logPath": str(LOG_PATH),
+            })
+            return True
+        if action != "download":
+            raise RuntimeError("Unknown native host action.")
+        run_download(message)
+        return True
+    except NativePipeClosed:
+        LOGGER.warning("job=%s response pipe closed", job_id)
+        return False
+    except FileNotFoundError as error:
+        missing = str(error)
+        LOGGER.exception("job=%s required tool missing: %s", job_id, missing)
+        if missing in ("yt-dlp", "ffmpeg", "ffprobe"):
+            fail(job_id, "yt-dlp、ffmpeg 或 ffprobe 缺失。请重新安装 Darren Video Helper。", details=missing)
+        else:
+            fail(job_id, f"内置下载工具缺失：{missing}", details=missing)
+        return True
+    except Exception as error:
+        message_text = str(error)
+        LOGGER.exception("job=%s failed: %s", job_id, message_text.split("\n", 1)[0])
+        fail(
+            job_id,
+            classify_failure(message_text, fallback=message_text.split("\n", 1)[0]),
+            details=message_text,
+        )
+        return True
 
 
 def main():
+    setup_logging()
+    LOGGER.info(
+        "host start version=%s pid=%s ppid=%s executable=%s frozen=%s cwd=%s",
+        HOST_VERSION,
+        os.getpid(),
+        os.getppid(),
+        sys.executable,
+        bool(getattr(sys, "frozen", False)),
+        os.getcwd(),
+    )
     if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
         print(json.dumps({
             "ok": True,
@@ -634,29 +746,23 @@ def main():
             "ffmpeg": tool_path("ffmpeg"),
             "ffprobe": tool_path("ffprobe"),
             "outputDir": str(DEFAULT_OUTPUT_DIR),
+            "logPath": str(LOG_PATH),
         }))
+        LOGGER.info("host exit reason=self-test")
         return
 
-    message = read_message()
-    if not message:
-        return
-
-    job_id = message.get("jobId") or "job"
     try:
-        if message.get("action") != "download":
-            raise RuntimeError("Unknown native host action.")
-        run_download(message)
-    except NativePipeClosed:
-        return
-    except FileNotFoundError as error:
-        missing = str(error)
-        if missing in ("yt-dlp", "ffmpeg", "ffprobe"):
-            fail(job_id, "yt-dlp、ffmpeg 或 ffprobe 缺失。请重新安装 Darren Video Helper。", details=missing)
-        else:
-            fail(job_id, f"内置下载工具缺失：{missing}", details=missing)
+        while True:
+            message = read_message()
+            if not message:
+                LOGGER.info("host exit reason=stdin-eof")
+                return
+            if not handle_message(message):
+                LOGGER.info("host exit reason=response-pipe-closed")
+                return
     except Exception as error:
-        message_text = str(error)
-        fail(job_id, classify_failure(message_text, fallback=message_text.split("\n", 1)[0]), details=message_text)
+        LOGGER.exception("host fatal framing error: %s", error)
+        LOGGER.info("host exit reason=fatal-framing-error")
 
 
 if __name__ == "__main__":

@@ -15,6 +15,24 @@ SPEC.loader.exec_module(HOST)
 
 
 class NativeHostTests(unittest.TestCase):
+    def test_main_keeps_the_native_port_alive_for_multiple_messages(self):
+        messages = [
+            {"action": "ping", "jobId": "ping-one"},
+            {"action": "ping", "jobId": "ping-two"},
+            None,
+        ]
+        with (
+            mock.patch.object(HOST, "setup_logging"),
+            mock.patch.object(HOST, "read_message", side_effect=messages),
+            mock.patch.object(HOST, "send_message") as sender,
+            mock.patch.object(HOST.sys, "argv", ["host.py"]),
+        ):
+            HOST.main()
+
+        self.assertEqual(sender.call_count, 2)
+        self.assertEqual(sender.call_args_list[0].args[0]["type"], "pong")
+        self.assertEqual(sender.call_args_list[1].args[0]["jobId"], "ping-two")
+
     def test_ytdlp_command_carries_snapshot_headers_and_retry_policy(self):
         message = {
             "pageUrl": "https://site.test/watch",
