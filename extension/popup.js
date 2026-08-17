@@ -2,6 +2,9 @@ let currentTabId = null;
 let currentState = null;
 const jobCache = new Map();
 let sessionRefreshTimer = 0;
+let activePreview = null;
+const PREVIEW_HOVER_DELAY_MS = 240;
+const PREVIEW_MAX_PLAY_MS = 8000;
 
 const pageTitleEl = document.getElementById("pageTitle");
 const noticeEl = document.getElementById("notice");
@@ -27,6 +30,10 @@ resumeQueueButton.addEventListener("click", async () => {
   await refreshJobs();
 });
 importFileEl.addEventListener("change", importUrlFile);
+window.addEventListener("blur", stopActivePreview);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopActivePreview();
+});
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.tabId === currentTabId && message.type === "videoSessionInvalidated") {
@@ -83,6 +90,7 @@ async function loadStreams() {
 }
 
 function renderStreams(streams) {
+  stopActivePreview();
   streamsEl.innerHTML = "";
 
   if (!streams.length) {
@@ -117,6 +125,7 @@ function renderStreams(streams) {
       placeholder.textContent = "▶";
       preview.appendChild(placeholder);
     }
+    if (stream.previewUrl) setupVideoPreview(preview, stream);
     const previewOverlay = document.createElement("div");
     previewOverlay.className = "preview-overlay";
     const formatPill = document.createElement("span");
@@ -142,7 +151,11 @@ function renderStreams(streams) {
 
     const source = document.createElement("p");
     source.className = "source";
-    source.textContent = `${stream.host || "网页视频"} · ${stream.sizeLabel || "大小未知"}`;
+    source.textContent = [
+      stream.providerLabel || stream.host || "网页视频",
+      stream.pipelineLabel || stream.formatLabel,
+      stream.sizeLabel || "大小未知"
+    ].filter(Boolean).join(" · ");
     body.appendChild(source);
 
     const actions = document.createElement("div");
@@ -192,6 +205,93 @@ function renderStreams(streams) {
     card.appendChild(body);
     streamsEl.appendChild(card);
   }
+}
+
+function setupVideoPreview(preview, stream) {
+  const video = document.createElement("video");
+  video.className = "preview-video";
+  video.muted = true;
+  video.defaultMuted = true;
+  video.playsInline = true;
+  video.preload = "none";
+  video.disablePictureInPicture = true;
+  video.setAttribute("muted", "");
+  video.setAttribute("playsinline", "");
+  video.setAttribute("preload", "none");
+  video.setAttribute("aria-hidden", "true");
+  preview.classList.add("can-preview");
+  preview.title = "悬停可静音预览；不支持时保留海报";
+  preview.appendChild(video);
+
+  let hoverTimer = 0;
+  let stopTimer = 0;
+  let unavailable = false;
+
+  const clearTimers = () => {
+    window.clearTimeout(hoverTimer);
+    window.clearTimeout(stopTimer);
+    hoverTimer = 0;
+    stopTimer = 0;
+  };
+
+  const stop = () => {
+    clearTimers();
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    preview.classList.remove("preview-loading", "preview-playing");
+    preview.dataset.previewMode = "poster";
+    if (activePreview?.preview === preview) activePreview = null;
+  };
+
+  const fail = () => {
+    unavailable = true;
+    stop();
+    preview.classList.remove("can-preview");
+    preview.dataset.previewMode = "poster-fallback";
+    preview.title = "此媒体地址不支持 popup 预览，已回退海报";
+  };
+
+  const start = () => {
+    hoverTimer = 0;
+    if (unavailable || !preview.matches(":hover")) return;
+    stopActivePreview(preview);
+    activePreview = { preview, stop };
+    preview.classList.add("preview-loading");
+    preview.dataset.previewMode = "loading";
+    video.src = stream.previewUrl;
+    video.load();
+    const playAttempt = video.play();
+    if (playAttempt?.catch) {
+      playAttempt.catch(() => {
+        if (activePreview?.preview === preview) fail();
+      });
+    }
+    stopTimer = window.setTimeout(stop, PREVIEW_MAX_PLAY_MS);
+  };
+
+  preview.addEventListener("mouseenter", () => {
+    if (unavailable || hoverTimer || activePreview?.preview === preview) return;
+    hoverTimer = window.setTimeout(start, PREVIEW_HOVER_DELAY_MS);
+  });
+  preview.addEventListener("mouseleave", stop);
+  video.addEventListener("loadeddata", () => {
+    if (activePreview?.preview !== preview) return;
+    preview.classList.remove("preview-loading");
+    preview.classList.add("preview-playing");
+    preview.dataset.previewMode = "video";
+  });
+  video.addEventListener("ended", stop);
+  video.addEventListener("error", () => {
+    if (activePreview?.preview === preview || preview.classList.contains("preview-loading")) fail();
+  });
+}
+
+function stopActivePreview(exceptPreview = null) {
+  if (!activePreview || activePreview.preview === exceptPreview) return;
+  const current = activePreview;
+  activePreview = null;
+  current.stop();
 }
 
 async function downloadStream(stream, button, qualityPreference = "best") {

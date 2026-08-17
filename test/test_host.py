@@ -83,7 +83,7 @@ class NativeHostTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "过小"):
                 HOST.ffprobe_info(output)
 
-    def test_duration_mismatch_is_deleted_and_failed(self):
+    def test_playable_mp4_is_preserved_when_page_duration_metadata_differs(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "wrong.mp4"
             output.write_bytes(b"0" * (128 * 1024))
@@ -93,11 +93,12 @@ class NativeHostTests(unittest.TestCase):
                 "width": 1280,
                 "height": 720,
             }):
-                with self.assertRaisesRegex(RuntimeError, "时长与当前视频明显不符"):
-                    HOST.validate_final_output("job", output, expected_duration=600)
-            self.assertFalse(output.exists())
+                validated, probe = HOST.validate_final_output("job", output, expected_duration=600)
+            self.assertEqual(validated, output)
+            self.assertEqual(probe["duration"], 20)
+            self.assertTrue(output.exists())
 
-    def test_short_ad_like_duration_mismatch_is_also_rejected(self):
+    def test_short_but_ffprobe_valid_mp4_is_not_deleted(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "wrong-short.mp4"
             output.write_bytes(b"0" * (128 * 1024))
@@ -107,9 +108,102 @@ class NativeHostTests(unittest.TestCase):
                 "width": 960,
                 "height": 540,
             }):
-                with self.assertRaisesRegex(RuntimeError, "时长与当前视频明显不符"):
-                    HOST.validate_final_output("job", output, expected_duration=30)
+                validated, probe = HOST.validate_final_output("job", output, expected_duration=30)
+            self.assertEqual(validated, output)
+            self.assertEqual(probe["duration"], 5)
+            self.assertTrue(output.exists())
+
+    def test_nonzero_ytdlp_exit_completes_when_mp4_passes_ffprobe(self):
+        class FakeProcess:
+            pid = 1234
+            stdout = iter(["ERROR: HTTP Error 403 after download\n"])
+
+            @staticmethod
+            def wait():
+                return 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            output = output_dir / "video.mp4"
+            output.write_bytes(b"0" * (128 * 1024))
+            with (
+                mock.patch.object(HOST, "build_ytdlp_command", return_value=["yt-dlp"]),
+                mock.patch.object(HOST.subprocess, "Popen", return_value=FakeProcess()),
+                mock.patch.object(HOST, "ffprobe_info", return_value={
+                    "fileSize": output.stat().st_size,
+                    "duration": 120,
+                    "width": 1920,
+                    "height": 1080,
+                }),
+                mock.patch.object(HOST, "progress") as progress,
+                mock.patch.object(HOST.sys, "stderr"),
+            ):
+                result, log, _started_at = HOST.run_ytdlp_attempt(
+                    "job", {}, "https://cdn.test/video.m3u8", output_dir, "video", "HLS"
+                )
+
+            self.assertEqual(result, output)
+            self.assertIn("403", log)
+            self.assertTrue(output.exists())
+            self.assertTrue(any(call.kwargs.get("percent") == "100" for call in progress.call_args_list))
+
+    def test_nonzero_ytdlp_exit_fails_and_removes_invalid_mp4(self):
+        class FakeProcess:
+            pid = 1234
+            stdout = iter(["ERROR: timed out\n"])
+
+            @staticmethod
+            def wait():
+                return 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            output = output_dir / "video.mp4"
+            output.write_bytes(b"0" * (128 * 1024))
+            with (
+                mock.patch.object(HOST, "build_ytdlp_command", return_value=["yt-dlp"]),
+                mock.patch.object(HOST.subprocess, "Popen", return_value=FakeProcess()),
+                mock.patch.object(HOST, "ffprobe_info", side_effect=RuntimeError("invalid moov atom")),
+                mock.patch.object(HOST, "progress"),
+                mock.patch.object(HOST.sys, "stderr"),
+            ):
+                result, log, _started_at = HOST.run_ytdlp_attempt(
+                    "job", {}, "https://cdn.test/video.m3u8", output_dir, "video", "HLS"
+                )
+
+            self.assertIsNone(result)
+            self.assertIn("no valid MP4", log)
             self.assertFalse(output.exists())
+
+    def test_dash_video_only_intermediate_is_not_recovered_as_final_mp4(self):
+        class FakeProcess:
+            pid = 1234
+            stdout = iter(["ERROR: merger failed\n"])
+
+            @staticmethod
+            def wait():
+                return 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            video_only = output_dir / "video.f137.mp4"
+            video_only.write_bytes(b"0" * (128 * 1024))
+            with (
+                mock.patch.object(HOST, "build_ytdlp_command", return_value=["yt-dlp"]),
+                mock.patch.object(HOST.subprocess, "Popen", return_value=FakeProcess()),
+                mock.patch.object(HOST, "ffprobe_info") as probe,
+                mock.patch.object(HOST, "progress"),
+                mock.patch.object(HOST.sys, "stderr"),
+            ):
+                result, log, started_at = HOST.run_ytdlp_attempt(
+                    "job", {}, "https://site.test/watch", output_dir, "video", "YouTube"
+                )
+                HOST.cleanup_sidecars(output_dir, ["video"], started_at)
+
+            self.assertIsNone(result)
+            self.assertIn("no valid MP4", log)
+            probe.assert_not_called()
+            self.assertFalse(video_only.exists())
 
     def test_direct_hls_failure_never_falls_back_to_page_url(self):
         targets = []

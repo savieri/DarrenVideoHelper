@@ -22,14 +22,41 @@
   box-sizing: border-box;
 }
 
+html,
 body {
   width: 390px;
+  min-width: 390px;
+  max-width: 390px;
+  overflow-x: hidden;
+}
+
+body {
   min-height: 360px;
   max-height: 600px;
   margin: 0;
   color: var(--text);
   background: transparent;
-  overflow-x: hidden;
+}
+
+body > *,
+.topbar,
+.title-block,
+.notice,
+.utility-actions,
+.streams,
+.jobs,
+.stream-card,
+.stream-body,
+.actions,
+.job,
+.job-top,
+.job-controls,
+details,
+summary,
+pre,
+code {
+  min-width: 0;
+  max-width: 100%;
 }
 
 body::before {
@@ -243,10 +270,27 @@ h1 {
   font-weight: 800;
 }
 
-.media-preview img {
+.media-preview.can-preview {
+  cursor: pointer;
+}
+
+.media-preview img,
+.preview-video {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.preview-video {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.media-preview.preview-playing .preview-video {
+  opacity: 1;
 }
 
 .preview-placeholder {
@@ -269,7 +313,7 @@ h1 {
   pointer-events: none;
 }
 
-.media-preview:hover .preview-overlay {
+.media-preview.can-preview:hover .preview-overlay {
   opacity: 0;
 }
 
@@ -361,6 +405,7 @@ h2 {
 .job-controls {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   margin-top: 7px;
 }
@@ -395,10 +440,19 @@ h2 {
 }
 
 .source-details ul {
+  min-width: 0;
+  max-width: 100%;
   max-height: 88px;
   margin: 5px 0 0;
   padding-left: 16px;
   overflow: auto;
+}
+
+.source-details li {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .source-details li + li {
@@ -491,11 +545,13 @@ h2 {
 
 code {
   display: block;
+  min-width: 0;
   max-width: 100%;
   margin-top: 6px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-x: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.62);
   border: 1px solid rgba(255, 255, 255, 0.54);
@@ -516,9 +572,14 @@ summary {
 }
 
 pre {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   max-height: 130px;
   margin: 6px 0 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
   word-break: break-word;
   border-radius: 8px;

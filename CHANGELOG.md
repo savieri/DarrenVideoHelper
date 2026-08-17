@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.2.0-beta.3 - 2026-08-17
+
+Prerelease only. Built from `agent/youtube-spa-logical-video` on the protected `codex/v1.2.0-beta.3` development branch; `main` is unchanged.
+
+### Fixed
+
+- Replaces the macOS PyInstaller Python host with `host-source` → `/usr/bin/python3 host.py` → Homebrew yt-dlp plus bundled ffmpeg/ffprobe.
+- Makes native-host self-test mandatory during installation and validates the exact resolved tool chain.
+- Disables a leftover bundled macOS yt-dlp by recoverable timestamped rename so it cannot shadow Homebrew yt-dlp.
+- Checks this job's MP4 with ffprobe after yt-dlp exits even when the exit code is nonzero; a valid video stream, duration, and file size now produce `complete`.
+- Recovers only the exact final job filename; yt-dlp `*.f137.mp4`-style DASH single-track intermediates cannot be reported as complete.
+- Preserves ffprobe-valid MP4 files when page duration metadata differs and prevents a later native error from overwriting a completed popup job.
+- Locks the popup document and long job/error content to 390px without horizontal expansion.
+- Presents YouTube as `DASH → MP4`, HLS as `HLS → MP4`, and keeps PAGE/SEG/single-track DASH evidence out of the main card.
+
+### Added
+
+- Adds one-at-a-time muted hover preview with `playsInline`, `preload=none`, a short start delay, an eight-second cap, immediate teardown on leave, and poster fallback on unsupported/CORS-limited sources.
+- Adds a macOS package builder that rejects PyInstaller host and bundled macOS yt-dlp regressions, then self-tests the staged source host.
+- Adds framed Native Messaging smoke coverage for direct MP4, HLS, invalid URL, and an optional live YouTube page URL, plus a headless Chrome width/preview smoke test.
+
+### Validation
+
+- Background/session/media/queue tests: 24 passed.
+- Native-host and macOS release-policy tests: 14 passed.
+- Isolated package installation and mandatory source-host self-test passed.
+- Framed direct MP4, HLS, invalid URL, and live YouTube `jNQXAC9IVRw` cases returned the expected terminal states.
+- Headless Chrome held 390px with long expanded diagnostics; local HTTP MP4 hover playback and leave teardown passed.
+
+### Known limitations
+
+- The user's live Chrome extension was intentionally not replaced. Real installed-popup acceptance for YouTube, third-party HLS/CORS behavior, and ad/main multi-candidate pages remains in `VALIDATION.md`.
+- Hover preview depends on the browser being able to reuse the observed media URL without custom request headers. Failure safely remains a poster and does not affect downloadability.
+
 ## 1.2.0-beta.2 - 2026-08-12
 
 Prerelease only. Beta.1 remains available as the historical build that exposed the real Native Messaging failure.

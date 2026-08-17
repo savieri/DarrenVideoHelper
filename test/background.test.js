@@ -363,6 +363,8 @@ test("YouTube resolver and DASH evidence aggregate into one logical MP4 video", 
       sourceKind: cards[0].sourceKind,
       typeTag: cards[0].typeTag,
       resourceId: cards[0].resourceId,
+      pipelineLabel: cards[0].pipelineLabel,
+      previewUrl: cards[0].previewUrl,
       evidenceCount: cards[0].evidenceCount,
       advancedKinds: cards[0].advancedSources.map((source) => source.sourceKind),
       qualityValues: cards[0].qualityOptions.map((option) => option.value)
@@ -372,6 +374,8 @@ test("YouTube resolver and DASH evidence aggregate into one logical MP4 video", 
   assert.equal(result.kind, "logical_video");
   assert.equal(result.sourceKind, "page_extractor");
   assert.equal(result.typeTag, "MP4");
+  assert.equal(result.pipelineLabel, "DASH → MP4");
+  assert.match(result.previewUrl, /googlevideo\.com\/videoplayback/);
   assert.match(result.resourceId, /^__page_extractor__:/);
   assert.equal(result.evidenceCount, 3);
   assert.deepEqual(Array.from(result.advancedKinds).sort(), ["dash_audio", "dash_video", "page_extractor"]);
@@ -398,6 +402,8 @@ test("HLS master and variants aggregate into one main-video card", () => {
   })()`);
   assert.equal(result.length, 1);
   assert.equal(result[0].typeTag, "MP4");
+  assert.equal(result[0].pipelineLabel, "HLS → MP4");
+  assert.equal(result[0].previewUrl, "https://cdn.test/720.m3u8");
   assert.equal(result[0].resourceId, "master");
   assert.equal(result[0].defaultQuality, "720p");
 });
@@ -594,4 +600,51 @@ test("a disconnected native port fails the active job instead of leaving Startin
   assert.match(result.message, /本地助手意外退出/);
   assert.match(result.details, /native-host\.log/);
   assert.equal(result.running, 0);
+});
+
+test("a verified completion cannot be overwritten by a later native error", async () => {
+  const { context } = loadBackground();
+  const result = await evaluate(context, `(async () => {
+    const payload = {
+      action: "download", url: "https://cdn.test/video.m3u8",
+      pageUrl: "https://site.test/watch", sourceTitle: "Video",
+      sessionId: "session:complete", resourceId: "resource:complete",
+      fingerprint: "fingerprint:complete"
+    };
+    const created = await enqueueDownload(payload, { skipDownloaded: false }, { quiet: true });
+    const onMessage = { listener: null, addListener(listener) { this.listener = listener; } };
+    const onDisconnect = { listener: null, addListener(listener) { this.listener = listener; } };
+    const port = { onMessage, onDisconnect, postMessage() {}, disconnect() {} };
+    chrome.runtime.connectNative = () => port;
+    startNativeJob(jobs.get(created.jobId), { outputDir: "~/Downloads/video_downloads" });
+    onMessage.listener({
+      type: "complete", jobId: created.jobId, outputPath: "/tmp/video.mp4",
+      fileSize: 123456, duration: 120, width: 1920, height: 1080
+    });
+    onMessage.listener({
+      type: "error", jobId: created.jobId, error: "late SSL EOF", details: "late SSL EOF"
+    });
+    const job = jobs.get(created.jobId);
+    return { status: job.status, outputPath: job.outputPath, error: job.error };
+  })()`);
+  assert.equal(result.status, "completed");
+  assert.equal(result.outputPath, "/tmp/video.mp4");
+  assert.equal(result.error, "");
+});
+
+test("popup CSS keeps the document and long diagnostic content inside 390px", () => {
+  const css = fs.readFileSync(path.join(__dirname, "../extension/style.css"), "utf8");
+  assert.match(css, /html,\s*body\s*\{[^}]*width:\s*390px;[^}]*max-width:\s*390px;/s);
+  assert.match(css, /pre\s*\{[^}]*overflow-wrap:\s*anywhere;[^}]*word-break:\s*break-word;/s);
+  assert.match(css, /code\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
+});
+
+test("popup preview is muted, metadata-light, bounded, and single-instance", () => {
+  const popup = fs.readFileSync(path.join(__dirname, "../extension/popup.js"), "utf8");
+  assert.match(popup, /PREVIEW_MAX_PLAY_MS\s*=\s*8000/);
+  assert.match(popup, /video\.muted\s*=\s*true/);
+  assert.match(popup, /video\.playsInline\s*=\s*true/);
+  assert.match(popup, /video\.preload\s*=\s*"none"/);
+  assert.match(popup, /stopActivePreview\(preview\)/);
+  assert.match(popup, /video\.removeAttribute\("src"\)/);
 });

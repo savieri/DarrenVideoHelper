@@ -12,7 +12,7 @@ from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
-HOST_VERSION = "1.2.0-beta.2"
+HOST_VERSION = "1.2.0-beta.3"
 DEFAULT_OUTPUT_DIR = Path.home() / "Downloads" / "video_downloads"
 LOG_PATH = Path.home() / "Library" / "Logs" / "DarrenVideoHelper" / "native-host.log"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
@@ -291,8 +291,9 @@ def matching_files(output_dir, stems, since):
 
 
 def newest_mp4_file(output_dir, stems, since):
-    for path in matching_files(output_dir, stems, since):
-        if path.suffix.lower() == ".mp4":
+    for stem in stems:
+        path = output_dir / f"{stem}.mp4"
+        if path.is_file() and path.stat().st_mtime >= since - 2:
             return path
     return None
 
@@ -313,6 +314,7 @@ def cleanup_sidecars(output_dir, stems, since, keep_path=None):
             or ".thumbnail." in lower_name
             or lower_name.endswith(".info.json")
             or lower_name.endswith(".description")
+            or re.search(r"\.f\d+\.(?:m4a|mp4|webm)$", lower_name) is not None
         )
         if should_delete:
             try:
@@ -420,19 +422,23 @@ def validate_final_output(job_id, output_path, expected_duration=0):
 
     try:
         probe = ffprobe_info(output_path)
-        expected = float(expected_duration or 0)
-        actual = float(probe.get("duration") or 0)
-        if expected >= 10 and (actual < expected * 0.4 or actual > expected * 1.6):
-            raise RuntimeError(
-                f"输出时长与当前视频明显不符（预期约 {expected:.1f}s，实际 {actual:.1f}s）。"
-            )
-        return output_path, probe
     except Exception as error:
         try:
             output_path.unlink()
         except OSError:
             pass
         raise RuntimeError(f"输出文件未通过 ffprobe 视频校验：{error}")
+
+    expected = float(expected_duration or 0)
+    actual = float(probe.get("duration") or 0)
+    if expected >= 10 and (actual < expected * 0.4 or actual > expected * 1.6):
+        LOGGER.warning(
+            "job=%s playable MP4 duration differs from page metadata expected=%.1f actual=%.1f; preserving valid output",
+            job_id,
+            expected,
+            actual,
+        )
+    return output_path, probe
 
 
 def classify_failure(output, fallback="下载失败。"):
@@ -549,10 +555,33 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
         raise
 
     combined_output = "".join(output_lines)
-    if return_code != 0:
-        return None, combined_output, started_at
-
     output_path = newest_mp4_file(output_dir, [stem], started_at)
+    if output_path:
+        try:
+            ffprobe_info(output_path)
+        except Exception as error:
+            LOGGER.warning("job=%s invalid MP4 candidate=%s error=%s", job_id, output_path, error)
+            combined_output += f"\nMP4 candidate failed ffprobe validation: {error}"
+            try:
+                output_path.unlink()
+            except OSError:
+                pass
+            output_path = None
+        else:
+            if return_code != 0:
+                LOGGER.warning(
+                    "job=%s yt-dlp exited code=%s after producing a valid MP4; treating verified file as complete",
+                    job_id,
+                    return_code,
+                )
+                progress(
+                    job_id,
+                    "yt-dlp 末尾报错，但完整 MP4 已通过 ffprobe；按下载完成处理。",
+                    percent="100",
+                    stage="merging",
+                )
+            return output_path, combined_output, started_at
+
     if not output_path:
         created = matching_files(output_dir, [stem], started_at)
         for path in created:
@@ -561,9 +590,11 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
                     path.unlink()
                 except OSError:
                     pass
-        return None, combined_output + "\nDownload finished, but no MP4 video output was found.", started_at
-
-    return output_path, combined_output, started_at
+        if return_code != 0:
+            combined_output += f"\nyt-dlp exited with code {return_code} and no valid MP4 was found."
+        else:
+            combined_output += "\nDownload finished, but no valid MP4 video output was found."
+        return None, combined_output, started_at
 
 
 def is_retryable_failure(output):

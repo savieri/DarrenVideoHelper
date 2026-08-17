@@ -819,6 +819,8 @@ function startNativeJob(job, settings) {
     }
 
     if (message.type === "complete") {
+      const current = jobs.get(job.id);
+      if (!current || current.status === "completed" || current.status === "cancelled") return;
       updateJob(job.id, {
         status: "completed",
         message: message.message || "下载完成，已输出 MP4。",
@@ -838,6 +840,8 @@ function startNativeJob(job, settings) {
     }
 
     if (message.type === "error") {
+      const current = jobs.get(job.id);
+      if (!current || current.status === "completed" || current.status === "cancelled") return;
       updateJob(job.id, {
         status: "failed",
         error: message.error || "Download failed.",
@@ -1268,6 +1272,56 @@ function makePopupStreams(state, detectedStreams) {
   return streams;
 }
 
+function previewUrlForStream(stream) {
+  const url = stream?.resourceUrl || stream?.lastUrl || stream?.url || "";
+  return /^https?:\/\//i.test(url) ? url : "";
+}
+
+function choosePreviewSource(state, rankedStreams, primary) {
+  const extractor = pageExtractorInfo(state.pageUrl);
+  let candidates = [];
+
+  if (extractor?.provider === "youtube") {
+    candidates = rankedStreams.filter((stream) => stream.kind === "dash_video");
+  } else if (primary.kind === "hls_master") {
+    candidates = rankedStreams.filter((stream) => (
+      stream.resourceId === primary.resourceId
+      || stream.parentMasterId === primary.resourceId
+    ));
+  } else if (primary.kind === "hls_media" && primary.parentMasterId) {
+    candidates = rankedStreams.filter((stream) => (
+      stream.resourceId === primary.resourceId
+      || stream.resourceId === primary.parentMasterId
+      || stream.parentMasterId === primary.parentMasterId
+    ));
+  } else {
+    candidates = [primary];
+  }
+
+  const previewable = candidates
+    .filter((stream) => ["mp4", "dash_video", "hls_master", "hls_media"].includes(stream.kind))
+    .filter((stream) => previewUrlForStream(stream))
+    .sort((left, right) => {
+      const leftQuality = Number(left.quality || 100000);
+      const rightQuality = Number(right.quality || 100000);
+      if (leftQuality !== rightQuality) return leftQuality - rightQuality;
+      return Number(right.stronglyAssociated === true) - Number(left.stronglyAssociated === true);
+    });
+  const selected = previewable[0];
+  if (!selected) return { previewUrl: "", previewSourceKind: "" };
+  return {
+    previewUrl: previewUrlForStream(selected),
+    previewSourceKind: selected.kind
+  };
+}
+
+function outputPipelineLabel(primary, extractor) {
+  if (extractor?.provider === "youtube") return "DASH → MP4";
+  if (isHlsKind(primary.kind)) return "HLS → MP4";
+  if (primary.kind === "mp4") return "Direct MP4";
+  return "Video → MP4";
+}
+
 function aggregateLogicalVideos(state, rankedStreams, settings = {}) {
   const primary = rankedStreams.find((stream) => stream.canDownloadWholeVideo && stream.isRecommendable);
   if (!primary) return [];
@@ -1290,6 +1344,8 @@ function aggregateLogicalVideos(state, rankedStreams, settings = {}) {
   const providerLabel = extractor?.provider === "youtube"
     ? "YouTube"
     : (getHost(state.pageUrl) || primary.host || "网页视频");
+  const pipelineLabel = outputPipelineLabel(primary, extractor);
+  const previewSource = choosePreviewSource(state, rankedStreams, primary);
   const advancedSources = settings.showAdvanced === true
     ? rankedStreams.map((stream) => ({
       resourceId: stream.resourceId,
@@ -1309,8 +1365,10 @@ function aggregateLogicalVideos(state, rankedStreams, settings = {}) {
     kind: "logical_video",
     sourceKind: primary.kind,
     typeTag: "MP4",
-    formatLabel: "MP4",
-    label: `${providerLabel} · 自动合并为 MP4`,
+    formatLabel: pipelineLabel,
+    pipelineLabel,
+    providerLabel,
+    label: `${providerLabel} · ${pipelineLabel}`,
     host: providerLabel,
     sourceTitle: state.pageTitle || primary.sourceTitle || providerLabel,
     thumbnailUrl: safeImageUrl(state.thumbnailUrl || primary.thumbnailUrl),
@@ -1322,6 +1380,7 @@ function aggregateLogicalVideos(state, rankedStreams, settings = {}) {
     defaultQuality,
     evidenceCount: rankedStreams.length,
     advancedSources,
+    ...previewSource,
     canDownloadWholeVideo: true,
     isRecommendable: true
   }];
