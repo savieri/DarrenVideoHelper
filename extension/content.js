@@ -4,6 +4,9 @@
   let lastCommittedIdentity = "";
   let lastCommittedHref = "";
   let pendingTimer = 0;
+  let activePreviewSession = null;
+  const PAGE_PREVIEW_INTERVAL_MS = 320;
+  const PAGE_PREVIEW_MAX_MS = 8000;
 
   function absolute(value) {
     if (!value) return "";
@@ -62,17 +65,23 @@
     };
   }
 
-  function selectMainVideo() {
+  function selectMainVideoElement() {
     return Array.from(document.querySelectorAll("video"))
-      .map(describe)
-      .filter((video) => video.currentSrc || video.duration || video.width || video.height)
+      .filter((video) => video.currentSrc || video.src || video.duration || video.videoWidth || video.clientWidth)
       .sort((left, right) => {
         const playingDiff = Number(!right.paused) - Number(!left.paused);
         if (playingDiff) return playingDiff;
-        const areaDiff = (right.width * right.height) - (left.width * left.height);
+        const leftArea = (left.videoWidth || left.clientWidth || 0) * (left.videoHeight || left.clientHeight || 0);
+        const rightArea = (right.videoWidth || right.clientWidth || 0) * (right.videoHeight || right.clientHeight || 0);
+        const areaDiff = rightArea - leftArea;
         if (areaDiff) return areaDiff;
         return (right.duration || 0) - (left.duration || 0);
       })[0] || null;
+  }
+
+  function selectMainVideo() {
+    const video = selectMainVideoElement();
+    return video ? describe(video) : null;
   }
 
   function send(message) {
@@ -80,6 +89,105 @@
       void chrome.runtime.lastError;
     });
   }
+
+  function sendPreviewEvent(message) {
+    send({ source: "darren-video-helper-page-preview", ...message });
+  }
+
+  function stopPagePreview(token = "", reason = "stopped") {
+    const session = activePreviewSession;
+    if (!session || (token && session.token !== token)) return false;
+    activePreviewSession = null;
+    window.clearTimeout(session.timer);
+    window.clearTimeout(session.stopTimer);
+    if (reason !== "replaced") {
+      sendPreviewEvent({ type: "pagePreviewStopped", token: session.token, reason });
+    }
+    return true;
+  }
+
+  function capturePagePreviewFrame(session) {
+    if (activePreviewSession !== session || Date.now() >= session.deadline) {
+      stopPagePreview(session.token, "timeout");
+      return;
+    }
+
+    const video = selectMainVideoElement();
+    const sourceWidth = video?.videoWidth || video?.clientWidth || 0;
+    const sourceHeight = video?.videoHeight || video?.clientHeight || 0;
+    if (!video || video.readyState < 2 || !sourceWidth || !sourceHeight) {
+      if (Date.now() - session.startedAt > 1800) {
+        sendPreviewEvent({ type: "pagePreviewUnavailable", token: session.token });
+        stopPagePreview(session.token, "unavailable");
+        return;
+      }
+      session.timer = window.setTimeout(() => capturePagePreviewFrame(session), 120);
+      return;
+    }
+
+    const width = Math.min(336, sourceWidth);
+    const height = Math.max(1, Math.round(width * sourceHeight / sourceWidth));
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) throw new Error("2D canvas is unavailable");
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = "medium";
+      context.drawImage(video, 0, 0, width, height);
+      sendPreviewEvent({
+        type: "pagePreviewFrame",
+        token: session.token,
+        frame: canvas.toDataURL("image/jpeg", 0.68),
+        pageTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+        pagePaused: video.paused
+      });
+      session.frameCount += 1;
+    } catch {
+      sendPreviewEvent({ type: "pagePreviewUnavailable", token: session.token });
+      stopPagePreview(session.token, "unavailable");
+      return;
+    }
+
+    session.timer = window.setTimeout(
+      () => capturePagePreviewFrame(session),
+      PAGE_PREVIEW_INTERVAL_MS
+    );
+  }
+
+  function startPagePreview(token, requestedDuration) {
+    stopPagePreview("", "replaced");
+    const video = selectMainVideoElement();
+    if (!token || !video) return false;
+    const duration = Math.max(500, Math.min(PAGE_PREVIEW_MAX_MS, Number(requestedDuration) || PAGE_PREVIEW_MAX_MS));
+    const session = {
+      token,
+      startedAt: Date.now(),
+      deadline: Date.now() + duration,
+      frameCount: 0,
+      timer: 0,
+      stopTimer: 0
+    };
+    activePreviewSession = session;
+    session.stopTimer = window.setTimeout(() => stopPagePreview(token, "timeout"), duration);
+    capturePagePreviewFrame(session);
+    return true;
+  }
+
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === "startPagePreview") {
+      const ok = startPagePreview(message.token, message.maxDurationMs);
+      sendResponse({ ok });
+      return false;
+    }
+    if (message?.type === "stopPagePreview") {
+      stopPagePreview(message.token || "", "popup-leave");
+      sendResponse({ ok: true });
+      return false;
+    }
+    return false;
+  });
 
   function navigationContext(phase, reason, href = location.href, previousHref = "") {
     const videoId = youtubeVideoId(href);

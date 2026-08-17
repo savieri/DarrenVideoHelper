@@ -15,7 +15,7 @@ The version is `1.2.0` rather than `1.1.2` because it changes both session lifec
 ## Release Packages
 
 ```text
-DarrenVideoHelper-macOS-1.2.0-beta.3.zip
+DarrenVideoHelper-macOS-v1.2.0-beta.3.zip
 DarrenVideoHelper-Windows.zip
 ```
 
@@ -93,7 +93,19 @@ Stage executable arm64 `ffmpeg` and `ffprobe` under `native/bin`, or point the b
 DARREN_MACOS_TOOLS_DIR="/path/to/macos/tools" ./build-macos-package.command
 ```
 
-The builder refuses an unexpected version, a PyInstaller `native/host`, or a bundled macOS yt-dlp. It runs `host.py --self-test` from the staged package before creating `dist/DarrenVideoHelper-macOS-1.2.0-beta.3.zip`.
+The builder refuses an unexpected version, a PyInstaller `native/host`, or a bundled macOS yt-dlp. It runs `host.py --self-test` from the staged package before creating `dist/DarrenVideoHelper-macOS-v1.2.0-beta.3.zip`.
+
+For a visible, fixed Chrome development path, run:
+
+```bash
+scripts/sync-dev-install.command --package
+```
+
+This synchronizes the unpacked extension and required native/install files to
+`~/Downloads/DarrenVideoHelper-beta3`. Chrome should always load
+`~/Downloads/DarrenVideoHelper-beta3/extension`. Add `--install-native` when the
+beta Native Host also needs to be updated; the installer backs up the previous
+source host first.
 
 ## macOS Uninstall
 
@@ -140,7 +152,7 @@ This removes the Native Messaging Host registration. Remove the Chrome extension
 - Keeps YouTube MSE `blob:` and poster churn inside the current session.
 - Aggregates resolver, DASH, HLS master/variant, and direct-file evidence into one main `LogicalVideo` card.
 - Shows one main logical-video card with user-facing pipelines such as `YouTube · DASH → MP4`, `HLS → MP4`, or `Direct MP4`; PAGE/SEG/DASH tracks remain internal evidence.
-- Shows a poster by default; after a short hover delay, one muted `playsInline` preview may play for at most eight seconds with `preload=none`. Leaving stops it, clears its media URL, and restores the poster. Unsupported/CORS-limited streams safely remain posters.
+- Shows a poster by default. Direct MP4 candidates first use one muted `playsInline` popup preview with `preload=none`; YouTube/HLS candidates mirror low-resolution frames from the page's existing player. The page player is never played, paused, seeked, or otherwise controlled. Leaving immediately stops and releases the preview, and every preview is capped at eight seconds. A CORS/MSE capture failure silently keeps the poster; diagnostics appear only in advanced details.
 - Keeps low-level DASH/HLS evidence inside optional advanced details instead of exposing it as extra downloadable videos.
 - Creates an immutable resource snapshot before queueing a native download.
 - Downloads only final MP4 output.
@@ -154,7 +166,7 @@ This removes the Native Messaging Host registration. Remove the Chrome extension
 - Writes native host startup, job, command, process, traceback, completion, and exit diagnostics to `~/Library/Logs/DarrenVideoHelper/native-host.log`.
 - Includes an Options page for output directory, quality, concurrency, cookies, download-history prompts, MP4-only mode, and advanced source details.
 
-Preview playback reuses an already observed MP4, HLS, or YouTube DASH video URL. It never invokes the download command, never controls the page player, and never plays more than one preview at a time.
+Preview playback uses a direct URL only for ordinary MP4. YouTube blob/MSE and HLS/DASH cards use continuous canvas frames from the page's existing main video element, avoiding popup CORS/CSP playback failures. It never invokes the download command, never controls the page player, and never runs more than one preview at a time.
 
 ## Rollback
 
@@ -201,4 +213,4 @@ Downloads are marked `Done` only when:
 - `ffprobe` detects at least one video stream
 - file size and duration are valid
 
-The native host performs these checks even when yt-dlp exits nonzero. A verified MP4 is reported as `Done` and is never deleted or overwritten by a trailing SSL EOF, timeout, 403, or late native error. Page-duration metadata is retained as diagnostics only because it can be stale or describe an ad/player state. If no MP4 passes ffprobe, the job reports `Failed`; invalid partial MP4 files and image/sidecar outputs from the current job are cleaned up.
+The native host performs these checks even when yt-dlp exits nonzero. It accepts only the exact MP4 target assigned to that job attempt, never a fuzzy directory match. A verified MP4 is reported as `Completed` and is never deleted or overwritten by a trailing progress event, SSL EOF, timeout, 403, post-processing warning, disconnect, or late native error. Page-duration metadata is retained as diagnostics only because it can be stale or describe an ad/player state. If the exact MP4 does not pass ffprobe, the job reports `Failed`; invalid partial MP4 files and image/sidecar outputs from the current job are cleaned up.

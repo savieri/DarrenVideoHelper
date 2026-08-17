@@ -9,6 +9,7 @@ const MAX_LOG_LINES = 140;
 const NATIVE_START_TIMEOUT_MS = 20 * 1000;
 const NATIVE_HOST_LOG_PATH = "~/Library/Logs/DarrenVideoHelper/native-host.log";
 const ACTIVE_JOB_STATUSES = new Set(["queued", "downloading", "merging"]);
+const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const SESSION_ENRICH_RETRIES = 1;
 const RECENT_MAIN_MEDIA_WINDOW_MS = 90 * 1000;
 const DEFAULT_SETTINGS = {
@@ -805,8 +806,11 @@ function startNativeJob(job, settings) {
     if (!message || message.jobId !== job.id) return;
     clearStartTimer();
 
+    const current = jobs.get(job.id);
+    if (!current || TERMINAL_JOB_STATUSES.has(current.status)) return;
+
     if (message.type === "progress") {
-      const currentStatus = jobs.get(job.id)?.status;
+      const currentStatus = current.status;
       const patch = {
         status: message.stage === "merging" || currentStatus === "merging" ? "merging" : "downloading",
         message: message.message || "Downloading...",
@@ -819,8 +823,6 @@ function startNativeJob(job, settings) {
     }
 
     if (message.type === "complete") {
-      const current = jobs.get(job.id);
-      if (!current || current.status === "completed" || current.status === "cancelled") return;
       updateJob(job.id, {
         status: "completed",
         message: message.message || "下载完成，已输出 MP4。",
@@ -829,6 +831,13 @@ function startNativeJob(job, settings) {
         duration: message.duration || 0,
         width: message.width || 0,
         height: message.height || 0,
+        videoStreams: message.videoStreams || 0,
+        audioStreams: message.audioStreams || 0,
+        hasAudio: message.hasAudio === true,
+        videoCodec: message.videoCodec || "",
+        audioCodec: message.audioCodec || "",
+        error: "",
+        details: "",
         percent: "100",
         speed: "",
         eta: ""
@@ -840,8 +849,6 @@ function startNativeJob(job, settings) {
     }
 
     if (message.type === "error") {
-      const current = jobs.get(job.id);
-      if (!current || current.status === "completed" || current.status === "cancelled") return;
       updateJob(job.id, {
         status: "failed",
         error: message.error || "Download failed.",
@@ -943,15 +950,17 @@ function updateQueuedJobs(patch) {
 
 function updateJob(jobId, patch) {
   const job = jobs.get(jobId);
-  if (!job) return;
+  if (!job) return false;
+  if (TERMINAL_JOB_STATUSES.has(job.status)) return false;
   Object.assign(job, patch, { updatedAt: Date.now() });
   jobs.set(jobId, job);
   broadcastJob(job);
+  return true;
 }
 
 function appendJobLog(jobId, line) {
   const job = jobs.get(jobId);
-  if (!job || !line) return;
+  if (!job || !line || TERMINAL_JOB_STATUSES.has(job.status)) return;
   job.logs = [...(job.logs || []), String(line).slice(0, 600)];
   if (job.logs.length > MAX_LOG_LINES) job.logs = job.logs.slice(-MAX_LOG_LINES);
 }
@@ -1282,18 +1291,23 @@ function choosePreviewSource(state, rankedStreams, primary) {
   let candidates = [];
 
   if (extractor?.provider === "youtube") {
-    candidates = rankedStreams.filter((stream) => stream.kind === "dash_video");
+    return {
+      previewUrl: "",
+      previewSourceKind: "page_player",
+      previewStrategy: "page_player"
+    };
   } else if (primary.kind === "hls_master") {
-    candidates = rankedStreams.filter((stream) => (
-      stream.resourceId === primary.resourceId
-      || stream.parentMasterId === primary.resourceId
-    ));
+    return {
+      previewUrl: "",
+      previewSourceKind: "page_player",
+      previewStrategy: "page_player"
+    };
   } else if (primary.kind === "hls_media" && primary.parentMasterId) {
-    candidates = rankedStreams.filter((stream) => (
-      stream.resourceId === primary.resourceId
-      || stream.resourceId === primary.parentMasterId
-      || stream.parentMasterId === primary.parentMasterId
-    ));
+    return {
+      previewUrl: "",
+      previewSourceKind: "page_player",
+      previewStrategy: "page_player"
+    };
   } else {
     candidates = [primary];
   }
@@ -1308,10 +1322,11 @@ function choosePreviewSource(state, rankedStreams, primary) {
       return Number(right.stronglyAssociated === true) - Number(left.stronglyAssociated === true);
     });
   const selected = previewable[0];
-  if (!selected) return { previewUrl: "", previewSourceKind: "" };
+  if (!selected) return { previewUrl: "", previewSourceKind: "", previewStrategy: "poster" };
   return {
     previewUrl: previewUrlForStream(selected),
-    previewSourceKind: selected.kind
+    previewSourceKind: selected.kind,
+    previewStrategy: selected.kind === "mp4" ? "popup_video" : "page_player"
   };
 }
 

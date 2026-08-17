@@ -5,7 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 TOOLS_DIR="${DARREN_MACOS_TOOLS_DIR:-$PROJECT_ROOT/native/bin}"
 OUTPUT_DIR="${DARREN_BUILD_OUTPUT_DIR:-$PROJECT_ROOT/dist}"
 VERSION_NAME="$(cd "$PROJECT_ROOT" && /usr/bin/python3 -c 'import json, pathlib; print(json.loads(pathlib.Path("extension/manifest.json").read_text())["version_name"])')"
-PACKAGE_BASENAME="DarrenVideoHelper-macOS-$VERSION_NAME"
+PACKAGE_BASENAME="DarrenVideoHelper-macOS-v$VERSION_NAME"
 TEMP_PARENT="$(mktemp -d)"
 STAGE_DIR="$TEMP_PARENT/$PACKAGE_BASENAME"
 ARCHIVE_PATH="$OUTPUT_DIR/$PACKAGE_BASENAME.zip"
@@ -42,7 +42,7 @@ for tool in ffmpeg ffprobe; do
   fi
 done
 
-mkdir -p "$STAGE_DIR/native/bin" "$OUTPUT_DIR"
+mkdir -p "$STAGE_DIR/native/bin" "$STAGE_DIR/scripts" "$OUTPUT_DIR"
 cp -R "$PROJECT_ROOT/extension" "$STAGE_DIR/extension"
 install -m 0644 "$PROJECT_ROOT/native/host.py" "$STAGE_DIR/native/host.py"
 install -m 0755 "$TOOLS_DIR/ffmpeg" "$STAGE_DIR/native/bin/ffmpeg"
@@ -52,6 +52,7 @@ for file in install.command uninstall.command README.md VALIDATION.md LICENSE; d
   cp "$PROJECT_ROOT/$file" "$STAGE_DIR/$file"
 done
 chmod 0755 "$STAGE_DIR/install.command" "$STAGE_DIR/uninstall.command"
+install -m 0755 "$PROJECT_ROOT/scripts/sync-dev-install.command" "$STAGE_DIR/scripts/sync-dev-install.command"
 
 if [[ -e "$STAGE_DIR/native/host" || -e "$STAGE_DIR/native/bin/yt-dlp" ]]; then
   echo "Refusing to package a PyInstaller macOS host or bundled yt-dlp." >&2

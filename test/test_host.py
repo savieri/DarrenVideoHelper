@@ -15,6 +15,9 @@ SPEC.loader.exec_module(HOST)
 
 
 class NativeHostTests(unittest.TestCase):
+    def setUp(self):
+        HOST.TERMINAL_JOB_TYPES.clear()
+
     def test_main_keeps_the_native_port_alive_for_multiple_messages(self):
         messages = [
             {"action": "ping", "jobId": "ping-one"},
@@ -146,6 +149,31 @@ class NativeHostTests(unittest.TestCase):
             self.assertIn("403", log)
             self.assertTrue(output.exists())
             self.assertTrue(any(call.kwargs.get("percent") == "100" for call in progress.call_args_list))
+
+    def test_complete_prevents_late_native_error_for_same_job(self):
+        output = Path("/tmp/verified-video.mp4")
+        probe = {
+            "fileSize": 209 * 1024 * 1024,
+            "duration": 1200,
+            "width": 1920,
+            "height": 1080,
+            "videoStreams": 1,
+            "audioStreams": 1,
+            "hasAudio": True,
+            "videoCodec": "h264",
+            "audioCodec": "aac",
+        }
+        with mock.patch.object(HOST, "send_message") as sender:
+            self.assertTrue(HOST.complete("job:terminal", output, probe))
+            self.assertFalse(HOST.progress("job:terminal", "late progress"))
+            self.assertFalse(HOST.fail("job:terminal", "late SSL EOF"))
+
+        self.assertEqual(sender.call_count, 1)
+        message = sender.call_args.args[0]
+        self.assertEqual(message["type"], "complete")
+        self.assertEqual(message["outputPath"], str(output))
+        self.assertTrue(message["hasAudio"])
+        self.assertEqual(message["audioStreams"], 1)
 
     def test_nonzero_ytdlp_exit_fails_and_removes_invalid_mp4(self):
         class FakeProcess:

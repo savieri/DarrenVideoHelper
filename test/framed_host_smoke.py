@@ -145,6 +145,8 @@ def main():
             completed_path = Path(completed["outputPath"])
             if not completed_path.exists() or completed_path.suffix.lower() != ".mp4":
                 raise RuntimeError(f"Completed output is missing or not MP4: {completed_path}")
+            if completed.get("videoStreams", 0) < 1 or completed.get("audioStreams", 0) < 1:
+                raise RuntimeError(f"Direct MP4 probe did not report video+audio streams: {completed}")
 
             hls_url = f"http://127.0.0.1:{port}/hls/{playlist.name}"
             send_frame(process.stdin, {
@@ -169,6 +171,8 @@ def main():
             hls_path = Path(hls_completed["outputPath"])
             if not hls_path.exists() or hls_path.suffix.lower() != ".mp4":
                 raise RuntimeError(f"HLS output is missing or not MP4: {hls_path}")
+            if hls_completed.get("videoStreams", 0) < 1 or hls_completed.get("audioStreams", 0) < 1:
+                raise RuntimeError(f"HLS MP4 probe did not report video+audio streams: {hls_completed}")
 
             youtube_completed = None
             youtube_progress = []
@@ -216,6 +220,8 @@ def main():
                     "duration": completed.get("duration"),
                     "width": completed.get("width"),
                     "height": completed.get("height"),
+                    "videoStreams": completed.get("videoStreams"),
+                    "audioStreams": completed.get("audioStreams"),
                     "progressMessages": len(progress_messages),
                 },
                 "hls": {
@@ -224,6 +230,8 @@ def main():
                     "duration": hls_completed.get("duration"),
                     "width": hls_completed.get("width"),
                     "height": hls_completed.get("height"),
+                    "videoStreams": hls_completed.get("videoStreams"),
+                    "audioStreams": hls_completed.get("audioStreams"),
                     "progressMessages": len(hls_progress),
                 },
                 "invalidUrl": {
@@ -238,6 +246,8 @@ def main():
                     "duration": youtube_completed.get("duration"),
                     "width": youtube_completed.get("width"),
                     "height": youtube_completed.get("height"),
+                    "videoStreams": youtube_completed.get("videoStreams"),
+                    "audioStreams": youtube_completed.get("audioStreams"),
                     "progressMessages": len(youtube_progress),
                 }
             print(json.dumps(summary, ensure_ascii=False))

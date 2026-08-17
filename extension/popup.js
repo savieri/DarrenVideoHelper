@@ -36,6 +36,12 @@ document.addEventListener("visibilitychange", () => {
 });
 
 chrome.runtime.onMessage.addListener((message) => {
+  if (message?.source === "darren-video-helper-page-preview") {
+    if (!activePreview || message.token !== activePreview.token) return;
+    if (message.type === "pagePreviewFrame") activePreview.showFrame(message.frame);
+    if (message.type === "pagePreviewUnavailable") activePreview.unavailable();
+    return;
+  }
   if (message?.tabId === currentTabId && message.type === "videoSessionInvalidated") {
     currentState = { ...(currentState || {}), navigating: true, streams: [], recommended: null };
     pageTitleEl.textContent = "正在切换视频…";
@@ -125,7 +131,9 @@ function renderStreams(streams) {
       placeholder.textContent = "▶";
       preview.appendChild(placeholder);
     }
-    if (stream.previewUrl) setupVideoPreview(preview, stream);
+    if (stream.previewStrategy !== "poster" && (stream.previewStrategy || stream.previewUrl)) {
+      setupHoverPreview(preview, stream);
+    }
     const previewOverlay = document.createElement("div");
     previewOverlay.className = "preview-overlay";
     const formatPill = document.createElement("span");
@@ -200,6 +208,10 @@ function renderStreams(streams) {
         list.appendChild(item);
       }
       details.appendChild(list);
+      const previewDiagnostic = document.createElement("p");
+      previewDiagnostic.className = "preview-diagnostic";
+      previewDiagnostic.hidden = true;
+      details.appendChild(previewDiagnostic);
       body.appendChild(details);
     }
     card.appendChild(body);
@@ -207,7 +219,7 @@ function renderStreams(streams) {
   }
 }
 
-function setupVideoPreview(preview, stream) {
+function setupHoverPreview(preview, stream) {
   const video = document.createElement("video");
   video.className = "preview-video";
   video.muted = true;
@@ -219,13 +231,19 @@ function setupVideoPreview(preview, stream) {
   video.setAttribute("playsinline", "");
   video.setAttribute("preload", "none");
   video.setAttribute("aria-hidden", "true");
+  const frame = document.createElement("img");
+  frame.className = "preview-frame";
+  frame.alt = "";
+  frame.setAttribute("aria-hidden", "true");
   preview.classList.add("can-preview");
-  preview.title = "悬停可静音预览；不支持时保留海报";
+  preview.title = "悬停静音预览";
   preview.appendChild(video);
+  preview.appendChild(frame);
 
   let hoverTimer = 0;
   let stopTimer = 0;
-  let unavailable = false;
+  let previewToken = "";
+  let pageFallbackStarted = false;
 
   const clearTimers = () => {
     window.clearTimeout(hoverTimer);
@@ -236,42 +254,97 @@ function setupVideoPreview(preview, stream) {
 
   const stop = () => {
     clearTimers();
+    const token = previewToken;
+    previewToken = "";
+    pageFallbackStarted = false;
     video.pause();
     video.removeAttribute("src");
     video.load();
+    frame.removeAttribute("src");
     preview.classList.remove("preview-loading", "preview-playing");
     preview.dataset.previewMode = "poster";
     if (activePreview?.preview === preview) activePreview = null;
+    if (token && currentTabId && chrome.tabs?.sendMessage) {
+      chrome.tabs.sendMessage(currentTabId, { type: "stopPagePreview", token }, () => {
+        void chrome.runtime.lastError;
+      });
+    }
   };
 
-  const fail = () => {
-    unavailable = true;
-    stop();
-    preview.classList.remove("can-preview");
+  const unavailable = () => {
+    const details = preview.closest(".stream-card")?.querySelector(".preview-diagnostic");
+    if (details) {
+      details.textContent = "预览不可用：页面播放器未提供可读取画面，已无感保留海报。";
+      details.hidden = false;
+    }
+    const current = activePreview;
+    if (current?.preview === preview) activePreview = null;
+    clearTimers();
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    frame.removeAttribute("src");
+    preview.classList.remove("preview-loading", "preview-playing");
     preview.dataset.previewMode = "poster-fallback";
-    preview.title = "此媒体地址不支持 popup 预览，已回退海报";
+  };
+
+  const showFrame = (dataUrl) => {
+    if (!dataUrl || activePreview?.preview !== preview) return;
+    frame.src = dataUrl;
+    preview.classList.remove("preview-loading");
+    preview.classList.add("preview-playing");
+    preview.dataset.previewMode = "page-player";
+  };
+
+  const startPagePlayerPreview = () => {
+    if (pageFallbackStarted || activePreview?.preview !== preview) return;
+    pageFallbackStarted = true;
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    previewToken = `preview:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+    activePreview.token = previewToken;
+    activePreview.showFrame = showFrame;
+    activePreview.unavailable = unavailable;
+    if (!currentTabId || !chrome.tabs?.sendMessage) {
+      unavailable();
+      return;
+    }
+    chrome.tabs.sendMessage(currentTabId, {
+      type: "startPagePreview",
+      token: previewToken,
+      maxDurationMs: PREVIEW_MAX_PLAY_MS
+    }, (response) => {
+      const error = chrome.runtime.lastError;
+      if (activePreview?.preview !== preview) return;
+      if (error || !response?.ok) unavailable();
+    });
   };
 
   const start = () => {
     hoverTimer = 0;
-    if (unavailable || !preview.matches(":hover")) return;
+    if (!preview.matches(":hover")) return;
     stopActivePreview(preview);
-    activePreview = { preview, stop };
+    activePreview = { preview, stop, token: "", showFrame, unavailable };
     preview.classList.add("preview-loading");
     preview.dataset.previewMode = "loading";
-    video.src = stream.previewUrl;
-    video.load();
-    const playAttempt = video.play();
-    if (playAttempt?.catch) {
-      playAttempt.catch(() => {
-        if (activePreview?.preview === preview) fail();
-      });
+    if (stream.previewStrategy === "popup_video" && stream.previewUrl) {
+      video.src = stream.previewUrl;
+      video.load();
+      const playAttempt = video.play();
+      if (playAttempt?.catch) {
+        playAttempt.catch(() => {
+          if (activePreview?.preview === preview) startPagePlayerPreview();
+        });
+      }
+    } else {
+      startPagePlayerPreview();
     }
     stopTimer = window.setTimeout(stop, PREVIEW_MAX_PLAY_MS);
   };
 
   preview.addEventListener("mouseenter", () => {
-    if (unavailable || hoverTimer || activePreview?.preview === preview) return;
+    if (hoverTimer || activePreview?.preview === preview) return;
     hoverTimer = window.setTimeout(start, PREVIEW_HOVER_DELAY_MS);
   });
   preview.addEventListener("mouseleave", stop);
@@ -283,7 +356,9 @@ function setupVideoPreview(preview, stream) {
   });
   video.addEventListener("ended", stop);
   video.addEventListener("error", () => {
-    if (activePreview?.preview === preview || preview.classList.contains("preview-loading")) fail();
+    if (activePreview?.preview === preview || preview.classList.contains("preview-loading")) {
+      startPagePlayerPreview();
+    }
   });
 }
 
@@ -451,7 +526,7 @@ function makeBadge(text, variant) {
 }
 
 function jobStatus(job) {
-  if (job.status === "completed") return "Done";
+  if (job.status === "completed") return "Completed";
   if (job.status === "failed") return "Failed";
   if (job.status === "queued") return "Queued";
   if (job.status === "paused") return "Paused";

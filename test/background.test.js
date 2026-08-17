@@ -365,6 +365,7 @@ test("YouTube resolver and DASH evidence aggregate into one logical MP4 video", 
       resourceId: cards[0].resourceId,
       pipelineLabel: cards[0].pipelineLabel,
       previewUrl: cards[0].previewUrl,
+      previewStrategy: cards[0].previewStrategy,
       evidenceCount: cards[0].evidenceCount,
       advancedKinds: cards[0].advancedSources.map((source) => source.sourceKind),
       qualityValues: cards[0].qualityOptions.map((option) => option.value)
@@ -375,7 +376,8 @@ test("YouTube resolver and DASH evidence aggregate into one logical MP4 video", 
   assert.equal(result.sourceKind, "page_extractor");
   assert.equal(result.typeTag, "MP4");
   assert.equal(result.pipelineLabel, "DASH → MP4");
-  assert.match(result.previewUrl, /googlevideo\.com\/videoplayback/);
+  assert.equal(result.previewUrl, "");
+  assert.equal(result.previewStrategy, "page_player");
   assert.match(result.resourceId, /^__page_extractor__:/);
   assert.equal(result.evidenceCount, 3);
   assert.deepEqual(Array.from(result.advancedKinds).sort(), ["dash_audio", "dash_video", "page_extractor"]);
@@ -403,7 +405,8 @@ test("HLS master and variants aggregate into one main-video card", () => {
   assert.equal(result.length, 1);
   assert.equal(result[0].typeTag, "MP4");
   assert.equal(result[0].pipelineLabel, "HLS → MP4");
-  assert.equal(result[0].previewUrl, "https://cdn.test/720.m3u8");
+  assert.equal(result[0].previewUrl, "");
+  assert.equal(result[0].previewStrategy, "page_player");
   assert.equal(result[0].resourceId, "master");
   assert.equal(result[0].defaultQuality, "720p");
 });
@@ -602,7 +605,7 @@ test("a disconnected native port fails the active job instead of leaving Startin
   assert.equal(result.running, 0);
 });
 
-test("a verified completion cannot be overwritten by a later native error", async () => {
+test("progress then complete stays completed after late progress and error", async () => {
   const { context } = loadBackground();
   const result = await evaluate(context, `(async () => {
     const payload = {
@@ -618,18 +621,37 @@ test("a verified completion cannot be overwritten by a later native error", asyn
     chrome.runtime.connectNative = () => port;
     startNativeJob(jobs.get(created.jobId), { outputDir: "~/Downloads/video_downloads" });
     onMessage.listener({
+      type: "progress", jobId: created.jobId, percent: "99.0",
+      message: "下载中... 99.0%", stage: "downloading"
+    });
+    onMessage.listener({
       type: "complete", jobId: created.jobId, outputPath: "/tmp/video.mp4",
-      fileSize: 123456, duration: 120, width: 1920, height: 1080
+      fileSize: 123456, duration: 120, width: 1920, height: 1080,
+      videoStreams: 1, audioStreams: 1, hasAudio: true
+    });
+    onMessage.listener({
+      type: "progress", jobId: created.jobId, percent: "100.0",
+      message: "late progress", stage: "merging"
     });
     onMessage.listener({
       type: "error", jobId: created.jobId, error: "late SSL EOF", details: "late SSL EOF"
     });
     const job = jobs.get(created.jobId);
-    return { status: job.status, outputPath: job.outputPath, error: job.error };
+    return {
+      status: job.status,
+      outputPath: job.outputPath,
+      error: job.error,
+      message: job.message,
+      hasAudio: job.hasAudio,
+      percent: job.percent
+    };
   })()`);
   assert.equal(result.status, "completed");
   assert.equal(result.outputPath, "/tmp/video.mp4");
   assert.equal(result.error, "");
+  assert.match(result.message, /下载完成/);
+  assert.equal(result.hasAudio, true);
+  assert.equal(result.percent, "100");
 });
 
 test("popup CSS keeps the document and long diagnostic content inside 390px", () => {
@@ -639,12 +661,21 @@ test("popup CSS keeps the document and long diagnostic content inside 390px", ()
   assert.match(css, /code\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
 });
 
-test("popup preview is muted, metadata-light, bounded, and single-instance", () => {
+test("popup preview is muted, bounded, single-instance, and silently falls back to page frames", () => {
   const popup = fs.readFileSync(path.join(__dirname, "../extension/popup.js"), "utf8");
+  const content = fs.readFileSync(path.join(__dirname, "../extension/content.js"), "utf8");
   assert.match(popup, /PREVIEW_MAX_PLAY_MS\s*=\s*8000/);
   assert.match(popup, /video\.muted\s*=\s*true/);
   assert.match(popup, /video\.playsInline\s*=\s*true/);
   assert.match(popup, /video\.preload\s*=\s*"none"/);
   assert.match(popup, /stopActivePreview\(preview\)/);
   assert.match(popup, /video\.removeAttribute\("src"\)/);
+  assert.match(popup, /startPagePreview/);
+  assert.match(popup, /pagePreviewFrame/);
+  assert.doesNotMatch(popup, /此媒体地址不支持 popup 预览/);
+  assert.match(content, /canvas\.toDataURL\("image\/jpeg"/);
+  assert.match(content, /PAGE_PREVIEW_MAX_MS\s*=\s*8000/);
+  assert.match(content, /video\.paused/);
+  assert.doesNotMatch(content, /video\.play\(/);
+  assert.doesNotMatch(content, /video\.pause\(/);
 });

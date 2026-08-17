@@ -84,6 +84,7 @@ async function main() {
     await new Promise((resolve) => previewServer.listen(0, "127.0.0.1", resolve));
     const address = previewServer.address();
     state.streams[0].previewUrl = `http://127.0.0.1:${address.port}/preview.mp4`;
+    state.streams[0].previewStrategy = "popup_video";
   }
 
   const systemChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";

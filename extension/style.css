@@ -281,6 +281,27 @@ h1 {
   object-fit: cover;
 }
 
+.preview-frame {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: none;
+}
+
+.media-preview[data-preview-mode="page-player"] .preview-frame {
+  display: block;
+}
+
+.preview-diagnostic {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .preview-video {
   position: absolute;
   inset: 0;

@@ -11,6 +11,7 @@
 | Framed Native Messaging E2E | PASS | Direct MP4: 2.000s, 165,799 bytes; HLS→MP4: 2.043s, 166,343 bytes; invalid URL returns error; all in one persistent source-host process |
 | YouTube page-extractor E2E | PASS | Public `jNQXAC9IVRw` page URL → MP4 → complete; 320×240, 19.014s, 475,990 bytes |
 | Headless popup layout and preview | PASS | 390px client/scroll width with long URL/path/error details expanded; no overflow offenders; local MP4 hover plays muted with `preload=none`, then leave pauses, clears `src`, and restores poster |
+| Page-player frame mirror smoke | PASS | Four JPEG frames captured from a playing page video; original `currentSrc` and play state unchanged; mouseleave-equivalent stop produced no further frames |
 
 These checks are regression coverage, not end-to-end acceptance.
 
@@ -22,13 +23,13 @@ The user's currently working old extension and Native Host were deliberately not
 
 - [ ] YouTube A appears in the popup with one logical MP4 card.
 - [ ] The card says `YouTube · DASH → MP4`; PAGE is not shown as the user-facing format.
-- [ ] Hover the YouTube poster: muted preview starts when a reusable DASH URL is available; leaving restores the poster; unsupported URLs remain static without repeated requests.
+- [ ] Hover the YouTube poster: page-player frames appear without attempting to play the remote DASH URL; leaving restores the poster; the original player's play/pause state is unchanged.
 - [ ] Click YouTube B without refreshing: A is disabled immediately, then the popup changes to B.
 - [ ] Browser Back: popup changes to A automatically.
 - [ ] Browser Forward: popup changes to B automatically.
 - [ ] Download A and B; `ffprobe` confirms both a video stream and an audio stream, and manual playback confirms each file matches its own page.
 - [ ] Normal HLS site A → B keeps the two sessions/files separate.
-- [ ] HLS and direct-MP4 cards preview when the browser supports their observed URL, otherwise safely retain the poster.
+- [ ] HLS cards use page-player frames; direct-MP4 cards use popup playback and fall back to page frames; unavailable previews silently retain the poster.
 - [ ] A preroll/ad page recommends the main program rather than the ad.
 - [ ] On an ad/main page, hover preview makes the selected candidate recognizable without starting a download or controlling the page player.
 - [ ] Start, progress, completion, failure, expanded details, and very long output paths never change the popup's 390px width.

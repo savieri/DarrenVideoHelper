@@ -26,6 +26,7 @@ SIDE_EXTENSIONS = IMAGE_EXTENSIONS | {
     ".srt",
 }
 LOGGER = logging.getLogger("DarrenVideoHelper.native")
+TERMINAL_JOB_TYPES = {}
 
 
 def setup_logging():
@@ -124,6 +125,13 @@ def diagnostic_details(details=""):
 
 
 def progress(job_id, message, percent=None, speed="", eta="", line="", stage="downloading"):
+    if job_id in TERMINAL_JOB_TYPES:
+        LOGGER.info(
+            "job=%s ignored late progress after terminal=%s",
+            job_id,
+            TERMINAL_JOB_TYPES[job_id],
+        )
+        return False
     payload = {
         "type": "progress",
         "jobId": job_id,
@@ -139,9 +147,17 @@ def progress(job_id, message, percent=None, speed="", eta="", line="", stage="do
     if line:
         payload["line"] = line.rstrip()
     send_message(payload)
+    return True
 
 
 def complete(job_id, output_path, probe):
+    if job_id in TERMINAL_JOB_TYPES:
+        LOGGER.info(
+            "job=%s ignored duplicate complete after terminal=%s",
+            job_id,
+            TERMINAL_JOB_TYPES[job_id],
+        )
+        return False
     send_message({
         "type": "complete",
         "jobId": job_id,
@@ -151,10 +167,25 @@ def complete(job_id, output_path, probe):
         "duration": probe.get("duration", 0),
         "width": probe.get("width", 0),
         "height": probe.get("height", 0),
+        "videoStreams": probe.get("videoStreams", 0),
+        "audioStreams": probe.get("audioStreams", 0),
+        "hasAudio": probe.get("hasAudio", False),
+        "videoCodec": probe.get("videoCodec", ""),
+        "audioCodec": probe.get("audioCodec", ""),
     })
+    TERMINAL_JOB_TYPES[job_id] = "complete"
+    return True
 
 
 def fail(job_id, message, reason="", details=""):
+    if job_id in TERMINAL_JOB_TYPES:
+        LOGGER.info(
+            "job=%s ignored late error after terminal=%s error=%s",
+            job_id,
+            TERMINAL_JOB_TYPES[job_id],
+            str(reason or message).split("\n", 1)[0],
+        )
+        return False
     send_message({
         "type": "error",
         "jobId": job_id,
@@ -162,6 +193,8 @@ def fail(job_id, message, reason="", details=""):
         "error": reason or message,
         "details": diagnostic_details(details or reason or message),
     })
+    TERMINAL_JOB_TYPES[job_id] = "error"
+    return True
 
 
 def sanitize_filename(value):
@@ -290,11 +323,14 @@ def matching_files(output_dir, stems, since):
     return sorted(set(results), key=lambda item: item.stat().st_mtime, reverse=True)
 
 
-def newest_mp4_file(output_dir, stems, since):
-    for stem in stems:
-        path = output_dir / f"{stem}.mp4"
+def exact_mp4_file(output_dir, stem, since):
+    """Return only this job attempt's explicit yt-dlp output target."""
+    path = output_dir / f"{stem}.mp4"
+    try:
         if path.is_file() and path.stat().st_mtime >= since - 2:
             return path
+    except OSError:
+        return None
     return None
 
 
@@ -357,6 +393,10 @@ def ffprobe_info(path):
         raise RuntimeError("输出文件没有 video stream，不能算下载成功。")
 
     video = video_streams[0]
+    audio_streams = [
+        stream for stream in data.get("streams", [])
+        if stream.get("codec_type") == "audio"
+    ]
     fmt = data.get("format") or {}
     duration = float(fmt.get("duration") or video.get("duration") or 0)
     size = int(fmt.get("size") or path.stat().st_size)
@@ -367,6 +407,11 @@ def ffprobe_info(path):
         "duration": duration,
         "width": int(video.get("width") or 0),
         "height": int(video.get("height") or 0),
+        "videoStreams": len(video_streams),
+        "audioStreams": len(audio_streams),
+        "hasAudio": bool(audio_streams),
+        "videoCodec": str(video.get("codec_name") or ""),
+        "audioCodec": str(audio_streams[0].get("codec_name") or "") if audio_streams else "",
     }
 
 
@@ -490,6 +535,7 @@ def parse_progress_line(line):
 
 def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
     output_name = f"{stem}.mp4"
+    expected_output_path = output_dir / output_name
     command = build_ytdlp_command(message, target_url, output_dir, output_name)
     started_at = time.time()
 
@@ -555,7 +601,7 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
         raise
 
     combined_output = "".join(output_lines)
-    output_path = newest_mp4_file(output_dir, [stem], started_at)
+    output_path = exact_mp4_file(output_dir, stem, started_at)
     if output_path:
         try:
             ffprobe_info(output_path)
@@ -583,6 +629,11 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
             return output_path, combined_output, started_at
 
     if not output_path:
+        LOGGER.info(
+            "job=%s no valid exact output at path=%s; refusing fuzzy MP4 recovery",
+            job_id,
+            expected_output_path,
+        )
         created = matching_files(output_dir, [stem], started_at)
         for path in created:
             if path.suffix.lower() in IMAGE_EXTENSIONS:
@@ -715,7 +766,15 @@ def run_download(message):
     )
     cleanup_sidecars(output_dir, used_stems, first_started_at, keep_path=output_path)
     complete(job_id, output_path, probe)
-    LOGGER.info("job=%s completed output=%s size=%s", job_id, output_path, probe.get("fileSize", 0))
+    LOGGER.info(
+        "job=%s completed output=%s size=%s duration=%s video_streams=%s audio_streams=%s",
+        job_id,
+        output_path,
+        probe.get("fileSize", 0),
+        probe.get("duration", 0),
+        probe.get("videoStreams", 0),
+        probe.get("audioStreams", 0),
+    )
 
 
 def handle_message(message):

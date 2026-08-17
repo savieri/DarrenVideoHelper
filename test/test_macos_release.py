@@ -22,6 +22,15 @@ class MacOSReleasePolicyTests(unittest.TestCase):
         self.assertIn('native/bin/yt-dlp', builder)
         self.assertIn("Refusing to package a PyInstaller macOS host", builder)
         self.assertNotIn("PyInstaller --clean", builder)
+        self.assertIn('PACKAGE_BASENAME="DarrenVideoHelper-macOS-v$VERSION_NAME"', builder)
+        self.assertIn("scripts/sync-dev-install.command", builder)
+
+    def test_visible_development_install_syncs_extension_and_native_files(self):
+        sync = (ROOT / "scripts" / "sync-dev-install.command").read_text(encoding="utf-8")
+        self.assertIn("Downloads/DarrenVideoHelper-beta3", sync)
+        self.assertIn('rsync -a --delete "$PROJECT_ROOT/extension/"', sync)
+        self.assertIn('native/host.py', sync)
+        self.assertIn('DarrenVideoHelper-macOS-v1.2.0-beta.3.zip', sync)
 
     def test_beta3_versions_match(self):
         manifest = json.loads((ROOT / "extension" / "manifest.json").read_text(encoding="utf-8"))
