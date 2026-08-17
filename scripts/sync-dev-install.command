@@ -41,7 +41,7 @@ install -m 0644 "$PROJECT_ROOT/native/host.py" "$DEV_INSTALL_ROOT/native/host.py
 install -m 0755 "$TOOLS_DIR/ffmpeg" "$DEV_INSTALL_ROOT/native/bin/ffmpeg"
 install -m 0755 "$TOOLS_DIR/ffprobe" "$DEV_INSTALL_ROOT/native/bin/ffprobe"
 
-for file in install.command uninstall.command README.md VALIDATION.md LICENSE; do
+for file in install.command uninstall.command README-FIRST.md README.md CHANGELOG.md VALIDATION.md LICENSE; do
   install -m 0644 "$PROJECT_ROOT/$file" "$DEV_INSTALL_ROOT/$file"
 done
 chmod 0755 "$DEV_INSTALL_ROOT/install.command" "$DEV_INSTALL_ROOT/uninstall.command"

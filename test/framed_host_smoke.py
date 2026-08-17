@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 import select
+import shutil
 import struct
 import subprocess
 import sys
@@ -64,6 +65,7 @@ def main():
     parser.add_argument("--host", required=True, type=Path, help="Installed host-source launcher or host.py")
     parser.add_argument("--ffmpeg", required=True, type=Path, help="Bundled ffmpeg executable")
     parser.add_argument("--youtube-url", help="Optional short public YouTube URL for a live page-extractor test")
+    parser.add_argument("--bilibili-url", help="Optional public Bilibili URL for a live paired-DASH test")
     args = parser.parse_args()
 
     host = args.host.resolve()
@@ -200,6 +202,80 @@ def main():
                 if not youtube_path.exists() or youtube_path.suffix.lower() != ".mp4":
                     raise RuntimeError(f"YouTube output is missing or not MP4: {youtube_path}")
 
+            bilibili_completed = None
+            bilibili_progress = []
+            bilibili_format = None
+            if args.bilibili_url:
+                yt_dlp = shutil.which("yt-dlp")
+                if not yt_dlp:
+                    raise RuntimeError("yt-dlp is required for the live Bilibili smoke test")
+                info = json.loads(subprocess.run(
+                    [yt_dlp, "--no-warnings", "--no-playlist", "--dump-single-json", args.bilibili_url],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    text=True,
+                ).stdout)
+                formats = info.get("formats") or []
+                videos = [
+                    item for item in formats
+                    if item.get("url")
+                    and item.get("vcodec") not in (None, "none")
+                    and item.get("acodec") in (None, "none")
+                    and item.get("ext") == "mp4"
+                ]
+                audios = [
+                    item for item in formats
+                    if item.get("url")
+                    and item.get("vcodec") in (None, "none")
+                    and item.get("acodec") not in (None, "none")
+                ]
+                if not videos or not audios:
+                    raise RuntimeError("Bilibili metadata did not expose separate video and audio DASH formats")
+                avc_videos = [item for item in videos if str(item.get("vcodec") or "").startswith("avc")]
+                selected_video = min(avc_videos or videos, key=lambda item: (item.get("height") or 0, item.get("tbr") or 0))
+                selected_audio = max(audios, key=lambda item: (item.get("abr") or 0, item.get("tbr") or 0))
+                page_headers = selected_video.get("http_headers") or info.get("http_headers") or {}
+                send_frame(process.stdin, {
+                    "action": "download",
+                    "jobId": "smoke-bilibili",
+                    "url": selected_video["url"],
+                    "pageUrl": args.bilibili_url,
+                    "pageTitle": "Bilibili paired DASH smoke",
+                    "sourceTitle": "Bilibili paired DASH smoke",
+                    "kind": "bilibili_dash",
+                    "preferPageUrl": True,
+                    "allowPageFallback": False,
+                    "expectedDuration": info.get("duration") or 0,
+                    "qualityPreference": f"{selected_video.get('height') or 'best'}p",
+                    "headers": {
+                        "referer": args.bilibili_url,
+                        "user-agent": page_headers.get("User-Agent") or "Mozilla/5.0 DarrenVideoHelper/1.2.0",
+                    },
+                    "directMedia": {
+                        "provider": "bilibili",
+                        "videoUrl": selected_video["url"],
+                        "audioUrl": selected_audio["url"],
+                    },
+                    "settings": {
+                        "outputDir": str(output),
+                        "autoCookies": False,
+                        "defaultQuality": "best",
+                    },
+                })
+                bilibili_completed, bilibili_progress = read_until(
+                    process.stdout, "complete", "smoke-bilibili", timeout=150
+                )
+                bilibili_path = Path(bilibili_completed["outputPath"])
+                if not bilibili_path.exists() or bilibili_path.suffix.lower() != ".mp4":
+                    raise RuntimeError(f"Bilibili output is missing or not MP4: {bilibili_path}")
+                if bilibili_completed.get("videoStreams", 0) < 1 or bilibili_completed.get("audioStreams", 0) < 1:
+                    raise RuntimeError(f"Bilibili MP4 did not contain video+audio: {bilibili_completed}")
+                bilibili_format = {
+                    "videoFormatId": selected_video.get("format_id"),
+                    "audioFormatId": selected_audio.get("format_id"),
+                    "height": selected_video.get("height"),
+                }
+
             send_frame(process.stdin, {
                 "action": "download",
                 "jobId": "smoke-invalid-url",
@@ -249,6 +325,18 @@ def main():
                     "videoStreams": youtube_completed.get("videoStreams"),
                     "audioStreams": youtube_completed.get("audioStreams"),
                     "progressMessages": len(youtube_progress),
+                }
+            if bilibili_completed:
+                summary["bilibili"] = {
+                    "status": "complete",
+                    "fileSize": bilibili_completed.get("fileSize"),
+                    "duration": bilibili_completed.get("duration"),
+                    "width": bilibili_completed.get("width"),
+                    "height": bilibili_completed.get("height"),
+                    "videoStreams": bilibili_completed.get("videoStreams"),
+                    "audioStreams": bilibili_completed.get("audioStreams"),
+                    "progressMessages": len(bilibili_progress),
+                    **bilibili_format,
                 }
             print(json.dumps(summary, ensure_ascii=False))
         finally:

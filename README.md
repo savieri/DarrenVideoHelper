@@ -12,22 +12,24 @@ It does not decrypt DRM, bypass paywalls, bypass login, or defeat site access co
 
 The version is `1.2.0` rather than `1.1.2` because it changes both session lifecycle behavior and the popup's media model/UI. The beta suffix records that real A/B file-content verification is still open.
 
-## Release Packages
+## Release Package
 
 ```text
 DarrenVideoHelper-macOS-v1.2.0-beta.3.zip
-DarrenVideoHelper-Windows.zip
 ```
 
-Both packages are designed for Chrome Developer Mode loading:
+This prerelease is verified and published for macOS only. A Windows package is not attached because the current beta was not rebuilt and validated on Windows.
 
-1. Install the native host with the included install script.
-2. Open `chrome://extensions/`.
-3. Enable `Developer mode`.
-4. Click `Load unpacked`.
-5. Select the included `extension` folder.
+The macOS package is designed for Chrome Developer Mode loading:
 
-## What Is Included
+1. Download and unzip the complete package.
+2. Double-click `install.command` and wait for the self-test to pass.
+3. Enable Developer mode at `chrome://extensions/` and click `Load unpacked`.
+4. Select the included `extension` folder.
+
+See `README-FIRST.md` inside the package for the shortest Chinese installation guide. Chrome requires the final manual `Load unpacked` action and does not permit this installer to silently bypass it.
+
+## What the macOS archive includes
 
 ```text
 extension/
@@ -44,25 +46,19 @@ extension/
   icons/
 native/
   host.py
-  host.exe
   bin/
-    yt-dlp.exe
     ffmpeg
-    ffmpeg.exe
     ffprobe
-    ffprobe.exe
 install.command
 uninstall.command
-install.bat
-uninstall.bat
+README-FIRST.md
 README.md
+CHANGELOG.md
 ```
 
 The macOS package does not contain a PyInstaller Python host or a bundled yt-dlp. `install.command` copies `native/host.py` plus bundled `ffmpeg`/`ffprobe` into `~/Library/Application Support/DarrenVideoHelper/native`, creates the executable `host-source` launcher, and registers that launcher with Chrome. The launcher executes `/usr/bin/python3 host.py`; the host resolves Homebrew yt-dlp and its own bundled media tools.
 
-Windows native host needs to be built on Windows.
-
-The Windows native host must be built on Windows with PyInstaller as `native/host.exe`. PyInstaller does not cross-compile Windows executables from macOS.
+The repository retains Windows build/install scaffolding, but the Windows native host must be built and validated on Windows before a Windows package is published. PyInstaller does not cross-compile Windows executables from macOS.
 
 ## macOS Install
 
@@ -81,6 +77,7 @@ The script:
 - points Chrome to the installed `host-source` launcher
 - runs a mandatory self-test and stops installation if it fails
 - opens `chrome://extensions/`
+- opens the included `extension` folder in Finder
 - prints the `extension` folder to load
 
 The source host deliberately uses Apple's `/usr/bin/python3` path that was verified on the target Mac. Homebrew yt-dlp is required. `ffmpeg` and `ffprobe` remain bundled with the package.

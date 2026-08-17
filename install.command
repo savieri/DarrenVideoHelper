@@ -56,7 +56,12 @@ done
 
 if [[ ! -x /opt/homebrew/bin/yt-dlp && ! -x /usr/local/bin/yt-dlp ]]; then
   echo "Homebrew yt-dlp was not found." >&2
-  echo "Install it with: brew install yt-dlp" >&2
+  if command -v brew >/dev/null 2>&1; then
+    echo "Install it in Terminal with: brew install yt-dlp" >&2
+  else
+    echo "Install Homebrew from https://brew.sh, then run: brew install yt-dlp" >&2
+  fi
+  echo "After installation, double-click install.command again." >&2
   exit 1
 fi
 
@@ -149,6 +154,9 @@ if [[ "$NO_OPEN" -eq 0 ]]; then
   if ! open -a "Google Chrome" "chrome://extensions/" >/dev/null 2>&1; then
     echo "Could not open Chrome automatically. Open chrome://extensions/ manually."
   fi
+  if ! open "$EXTENSION_DIR" >/dev/null 2>&1; then
+    echo "Could not open the extension folder automatically. Use the path printed below."
+  fi
 fi
 
 echo "Chrome extension folder to load:"
@@ -158,6 +166,9 @@ echo "In Chrome:"
 echo "1. Enable Developer mode"
 echo "2. Click Load unpacked"
 echo "3. Select the extension folder above"
+echo
+echo "Chrome requires this final manual step for unpacked extensions."
+echo "The installer cannot safely bypass it."
 echo
 
 if [[ "$NON_INTERACTIVE" -eq 0 && -t 0 ]]; then
