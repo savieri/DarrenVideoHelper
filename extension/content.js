@@ -1,10 +1,14 @@
 (() => {
   const NAVIGATION_SOURCE = "darren-video-helper-navigation";
+  const PAGE_MEDIA_SOURCE = "darren-video-helper-page-media";
   let lastContextSignature = "";
   let lastCommittedIdentity = "";
   let lastCommittedHref = "";
+  let navigationPending = false;
+  let navigationContextGeneration = 0;
   let pendingTimer = 0;
   let activePreviewSession = null;
+  let lastSiteMediaContext = null;
   const PAGE_PREVIEW_INTERVAL_MS = 320;
   const PAGE_PREVIEW_MAX_MS = 8000;
 
@@ -46,6 +50,11 @@
     if (videoId) return `youtube:${videoId}`;
     try {
       const parsed = new URL(url, location.href);
+      const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+      if (host === "bilibili.com" || host.endsWith(".bilibili.com")) {
+        const match = parsed.pathname.match(/^\/video\/(BV[0-9A-Za-z]+|av\d+)/i);
+        if (match) return `bilibili:${match[1].toLowerCase()}:p${parsed.searchParams.get("p") || "1"}`;
+      }
       parsed.hash = "";
       return parsed.href;
     } catch {
@@ -186,6 +195,21 @@
       sendResponse({ ok: true });
       return false;
     }
+    if (message?.type === "refreshSiteMedia") {
+      window.postMessage({
+        source: PAGE_MEDIA_SOURCE,
+        type: "request-bilibili-media",
+        pageIdentity: pageIdentity(),
+        at: Date.now()
+      }, location.origin === "null" ? "*" : location.origin);
+      window.setTimeout(() => {
+        const media = lastSiteMediaContext?.pageIdentity === pageIdentity()
+          ? lastSiteMediaContext
+          : null;
+        sendResponse({ ok: true, media });
+      }, 80);
+      return true;
+    }
     return false;
   });
 
@@ -207,13 +231,19 @@
 
   function publishNavigation(phase, reason, href = location.href, previousHref = "") {
     const identity = pageIdentity(href);
-    if (phase !== "start" && identity === lastCommittedIdentity && href === lastCommittedHref && reason !== "bridge-ready") {
+    if (phase === "start") {
+      navigationPending = true;
+      navigationContextGeneration += 1;
+    } else if (!navigationPending && identity === lastCommittedIdentity && href === lastCommittedHref && reason !== "bridge-ready") {
       return;
     }
     send(navigationContext(phase, reason, href, previousHref));
     if (phase !== "start") {
+      navigationPending = false;
       lastCommittedIdentity = identity;
       lastCommittedHref = href;
+      if (lastSiteMediaContext?.pageIdentity !== identity) lastSiteMediaContext = null;
+      startNavigationContextReconciliation(identity);
     }
   }
 
@@ -258,10 +288,42 @@
     pendingTimer = window.setTimeout(publishContext, 100);
   }
 
+  function reconcileNavigationContext(expectedIdentity, generation, attempt = 0) {
+    if (generation !== navigationContextGeneration || pageIdentity() !== expectedIdentity) return;
+    publishContext();
+    const urlVideoId = youtubeVideoId();
+    const domVideoId = metadataVideoId();
+    const youtubeReady = !urlVideoId || (
+      domVideoId === urlVideoId
+      && Boolean(document.title)
+      && Boolean(selectMainVideo())
+    );
+    if (youtubeReady || attempt >= 9) return;
+    const delays = [100, 200, 350, 600, 1000, 1600, 2400, 3200, 4500, 6000];
+    window.setTimeout(() => {
+      reconcileNavigationContext(expectedIdentity, generation, attempt + 1);
+    }, delays[attempt] || 6000);
+  }
+
+  function startNavigationContextReconciliation(identity) {
+    const generation = ++navigationContextGeneration;
+    window.setTimeout(() => reconcileNavigationContext(identity, generation), 0);
+  }
+
   window.addEventListener("message", (event) => {
-    if (event.source !== window || event.data?.source !== NAVIGATION_SOURCE || event.data?.type !== "navigation") return;
-    publishNavigation(event.data.phase, event.data.reason, event.data.href, event.data.previousHref || "");
-    schedule();
+    if (event.source !== window) return;
+    if (event.data?.source === NAVIGATION_SOURCE && event.data?.type === "navigation") {
+      publishNavigation(event.data.phase, event.data.reason, event.data.href, event.data.previousHref || "");
+      schedule();
+      return;
+    }
+    if (event.data?.source === PAGE_MEDIA_SOURCE && event.data?.type === "bilibili-media") {
+      const media = event.data.media;
+      if (!media || media.pageIdentity !== pageIdentity() || !Array.isArray(media.videos) || !media.videos.length) return;
+      lastSiteMediaContext = media;
+      send({ type: "siteMediaContext", media });
+      schedule();
+    }
   }, true);
 
   for (const eventName of [
@@ -298,6 +360,14 @@
     if (identity !== lastCommittedIdentity || location.href !== lastCommittedHref) {
       publishNavigation("start", "content-location-poll", location.href, lastCommittedHref);
       publishNavigation("commit", "content-location-poll", location.href, lastCommittedHref);
+    }
+    if (pageIdentity().startsWith("bilibili:")) {
+      window.postMessage({
+        source: PAGE_MEDIA_SOURCE,
+        type: "request-bilibili-media",
+        pageIdentity: pageIdentity(),
+        at: Date.now()
+      }, location.origin === "null" ? "*" : location.origin);
     }
     schedule();
   }, 500);

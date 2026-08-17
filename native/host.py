@@ -63,7 +63,7 @@ def redacted_command(command):
             redact_next = False
             continue
         result.append(redacted_url(text) if text.startswith(("http://", "https://")) else text)
-        if text in ("--add-header", "--cookies", "--cookies-from-browser"):
+        if text in ("--add-header", "--cookies", "--cookies-from-browser", "-headers"):
             redact_next = True
     return result
 
@@ -452,7 +452,7 @@ def remux_to_mp4(job_id, input_path):
     return output_path
 
 
-def validate_final_output(job_id, output_path, expected_duration=0):
+def validate_final_output(job_id, output_path, expected_duration=0, require_audio=False):
     suffix = output_path.suffix.lower()
     if suffix in IMAGE_EXTENSIONS:
         try:
@@ -473,6 +473,13 @@ def validate_final_output(job_id, output_path, expected_duration=0):
         except OSError:
             pass
         raise RuntimeError(f"输出文件未通过 ffprobe 视频校验：{error}")
+
+    if require_audio and not probe.get("hasAudio"):
+        try:
+            output_path.unlink()
+        except OSError:
+            pass
+        raise RuntimeError("Bilibili DASH 合并结果没有音频，已判定失败。")
 
     expected = float(expected_duration or 0)
     actual = float(probe.get("duration") or 0)
@@ -690,6 +697,105 @@ def run_ytdlp_with_retries(job_id, message, target_url, output_dir, stem, label,
     return None, "\n".join(combined), earliest_started_at
 
 
+def clean_header_value(value):
+    return re.sub(r"[\r\n]+", " ", str(value or "")).strip()
+
+
+def ffmpeg_http_headers(message):
+    headers = message.get("headers") or {}
+    page_url = message.get("pageUrl") or ""
+    values = {
+        "Referer": headers.get("referer") or message.get("referer") or page_url,
+        "User-Agent": headers.get("user-agent") or "Mozilla/5.0 DarrenVideoHelper/1.2.0",
+        "Cookie": headers.get("cookie") or "",
+        "Origin": headers.get("origin") or "",
+        "Accept-Language": headers.get("accept-language") or "",
+    }
+    return "".join(
+        f"{name}: {clean_header_value(value)}\r\n"
+        for name, value in values.items()
+        if clean_header_value(value)
+    )
+
+
+def build_ffmpeg_dash_command(message, video_url, audio_url, output_path):
+    ffmpeg = tool_path("ffmpeg")
+    video_url = validate_url(video_url)
+    audio_url = validate_url(audio_url)
+    header_block = ffmpeg_http_headers(message)
+    command = [ffmpeg, "-hide_banner", "-y", "-loglevel", "info"]
+    if header_block:
+        command.extend(["-headers", header_block])
+    command.extend(["-i", video_url])
+    if header_block:
+        command.extend(["-headers", header_block])
+    command.extend([
+        "-i", audio_url,
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c", "copy",
+        "-movflags", "+faststart",
+        str(output_path),
+    ])
+    return command
+
+
+def run_bilibili_dash_attempt(job_id, message, output_dir, stem):
+    direct = message.get("directMedia") or {}
+    video_urls = [direct.get("videoUrl"), *(direct.get("videoBackupUrls") or [])]
+    audio_urls = [direct.get("audioUrl"), *(direct.get("audioBackupUrls") or [])]
+    video_urls = list(dict.fromkeys(url for url in video_urls if url))[:3]
+    audio_urls = list(dict.fromkeys(url for url in audio_urls if url))[:3]
+    if not video_urls or not audio_urls:
+        return None, "Bilibili playinfo did not contain both video and audio DASH URLs.", time.time()
+
+    output_path = output_dir / f"{stem}.mp4"
+    started_at = time.time()
+    outputs = []
+    attempt_count = max(len(video_urls), len(audio_urls))
+    for index in range(attempt_count):
+        video_url = video_urls[min(index, len(video_urls) - 1)]
+        audio_url = audio_urls[min(index, len(audio_urls) - 1)]
+        try:
+            output_path.unlink()
+        except OSError:
+            pass
+        progress(
+            job_id,
+            f"正在下载并合并 Bilibili DASH 音视频（线路 {index + 1}/{attempt_count}）...",
+            stage="merging",
+        )
+        command = build_ffmpeg_dash_command(message, video_url, audio_url, output_path)
+        LOGGER.info(
+            "job=%s bilibili ffmpeg command=%s",
+            job_id,
+            json.dumps(redacted_command(command), ensure_ascii=False),
+        )
+        process = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+        )
+        output = process.stdout or ""
+        outputs.append(output)
+        if process.returncode == 0 and output_path.is_file():
+            try:
+                probe = ffprobe_info(output_path)
+                if not probe.get("hasAudio"):
+                    raise RuntimeError("merged MP4 does not contain audio")
+            except Exception as error:
+                outputs.append(f"Bilibili DASH output validation failed: {error}")
+            else:
+                return output_path, "\n".join(outputs), started_at
+        try:
+            output_path.unlink()
+        except OSError:
+            pass
+    return None, "\n".join(outputs), started_at
+
+
 def run_download(message):
     job_id = message.get("jobId") or "job"
     settings = message.get("settings") or {}
@@ -724,18 +830,31 @@ def run_download(message):
     first_output = ""
     first_started_at = time.time()
     first_target = page_url if (prefer_page or kind == "segment") and page_url else stream_url
-    output_path, first_output, first_started_at = run_ytdlp_with_retries(
-        job_id,
-        message,
-        first_target,
-        output_dir,
-        stem,
-        "第一步"
-    )
+    if kind == "bilibili_dash" and message.get("directMedia"):
+        output_path, first_output, first_started_at = run_bilibili_dash_attempt(
+            job_id,
+            message,
+            output_dir,
+            stem,
+        )
+    else:
+        output_path, first_output, first_started_at = run_ytdlp_with_retries(
+            job_id,
+            message,
+            first_target,
+            output_dir,
+            stem,
+            "第一步"
+        )
 
     used_stems = [stem]
     allow_page_fallback = message.get("allowPageFallback") is True
-    if not output_path and allow_page_fallback and page_url and page_url != first_target:
+    if (
+        not output_path
+        and allow_page_fallback
+        and page_url
+        and (page_url != first_target or kind == "bilibili_dash")
+    ):
         progress(job_id, "视频流 URL 失败，回退使用当前页面 URL...")
         fallback_stem = f"{stem} page"
         used_stems.append(fallback_stem)
@@ -763,6 +882,7 @@ def run_download(message):
         job_id,
         output_path,
         expected_duration=message.get("expectedDuration") or 0,
+        require_audio=kind == "bilibili_dash",
     )
     cleanup_sidecars(output_dir, used_stems, first_started_at, keep_path=output_path)
     complete(job_id, output_path, probe)

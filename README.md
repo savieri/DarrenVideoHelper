@@ -146,15 +146,17 @@ This removes the Native Messaging Host registration. Remove the Chrome extension
 
 ## Features
 
-- Detects `.m3u8`, `.mp4`, `.m4s`, `.ts`, and YouTube `googlevideo/videoplayback` DASH evidence.
-- Tracks YouTube navigation start/finish events, History API changes, `popstate`, tab/webNavigation updates, and a videoId/location polling fallback.
+- Detects `.m3u8`, `.mp4`, `.m4s`, `.ts`, YouTube `googlevideo/videoplayback` DASH evidence, and Bilibili paired DASH resources.
+- Tracks YouTube navigation start/finish events, History API changes, `popstate`, tab/webNavigation updates, and a videoId/location polling fallback; finish-time reconciliation waits for delayed current-video metadata and cancels older generations.
+- Reads Bilibili `__playinfo__`/`__INITIAL_STATE__` in the page world and captures playurl fetch/XHR responses, while rejecting stale BV/cid data after navigation.
 - Invalidates the previous selection as soon as navigation starts and creates a new `VideoSession` only when page/video identity really changes.
 - Keeps YouTube MSE `blob:` and poster churn inside the current session.
 - Aggregates resolver, DASH, HLS master/variant, and direct-file evidence into one main `LogicalVideo` card.
-- Shows one main logical-video card with user-facing pipelines such as `YouTube · DASH → MP4`, `HLS → MP4`, or `Direct MP4`; PAGE/SEG/DASH tracks remain internal evidence.
+- Shows one main logical-video card with user-facing pipelines such as `YouTube · DASH → MP4`, `Bilibili · DASH → MP4`, `HLS → MP4`, or `Direct MP4`; PAGE/SEG/DASH tracks remain internal evidence.
 - Shows a poster by default. Direct MP4 candidates first use one muted `playsInline` popup preview with `preload=none`; YouTube/HLS candidates mirror low-resolution frames from the page's existing player. The page player is never played, paused, seeked, or otherwise controlled. Leaving immediately stops and releases the preview, and every preview is capped at eight seconds. A CORS/MSE capture failure silently keeps the poster; diagnostics appear only in advanced details.
 - Keeps low-level DASH/HLS evidence inside optional advanced details instead of exposing it as extra downloadable videos.
 - Creates an immutable resource snapshot before queueing a native download.
+- Refreshes Bilibili playinfo at click time, merges one selected video representation with the best audio representation, retries signed backup URLs, and requires the final MP4 to contain audio.
 - Downloads only final MP4 output.
 - Does not save page screenshots as results.
 - Does not write thumbnails, info JSON, descriptions, subtitles, or sidecar files.

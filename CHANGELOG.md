@@ -14,20 +14,26 @@ Prerelease only. Built from `agent/youtube-spa-logical-video` on the protected `
 - Preserves ffprobe-valid MP4 files when page duration metadata differs and prevents a later native error from overwriting a completed popup job.
 - Locks the popup document and long job/error content to 390px without horizontal expansion.
 - Presents YouTube as `DASH → MP4`, HLS as `HLS → MP4`, and keeps PAGE/SEG/single-track DASH evidence out of the main card.
+- Keeps YouTube SPA navigation pending until the matching finish is delivered, then reconciles delayed player metadata by videoId without allowing an older generation to refill the session.
+- Adds a Bilibili playinfo/fetch/XHR bridge that pairs the current DASH video and audio as one `Bilibili · DASH → MP4` candidate at the highest quality actually returned for the current login state.
+- Refreshes signed Bilibili resources at download time and lets the Native Host merge the selected video/audio URLs with current Referer/User-Agent/Cookie headers, backup CDN retry, page-extractor fallback, and mandatory audio validation.
 
 ### Added
 
 - Adds one-at-a-time muted hover preview with `playsInline`, `preload=none`, a short start delay, an eight-second cap, immediate teardown on leave, and poster fallback on unsupported/CORS-limited sources.
 - Adds a macOS package builder that rejects PyInstaller host and bundled macOS yt-dlp regressions, then self-tests the staged source host.
 - Adds framed Native Messaging smoke coverage for direct MP4, HLS, invalid URL, and an optional live YouTube page URL, plus a headless Chrome width/preview smoke test.
+- Adds live YouTube three-transition SPA coverage and Bilibili bridge, stale-playinfo, quality-tier, paired-download, header, and audio regressions.
 
 ### Validation
 
-- Background/session/media/queue tests: 24 passed.
-- Native-host and macOS release-policy tests: 14 passed.
+- JavaScript background/content/bridge tests: 29 passed.
+- Native-host and macOS release-policy tests: 19 passed.
 - Isolated package installation and mandatory source-host self-test passed.
 - Framed direct MP4, HLS, invalid URL, and live YouTube `jNQXAC9IVRw` cases returned the expected terminal states.
 - Headless Chrome held 390px with long expanded diagnostics; local HTTP MP4 hover playback and leave teardown passed.
+- Real YouTube content-script smoke switched `jNQXAC9IVRw → 0PT5c1z3LL8 → HTzw_grLzjw → TLBlFGwU7o0` without a document reload; every settled URL, title, and DOM videoId matched.
+- Public Bilibili `BV1GJ411x7h7` exposed 480P as the highest anonymous DASH tier; the Native Host completed a 26,347,814-byte, 212.309s, 852×480 H.264/AAC MP4 with one video and one audio stream.
 
 ### Known limitations
 

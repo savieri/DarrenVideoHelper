@@ -4,14 +4,16 @@
 
 | Area | Result | Scope |
 | --- | --- | --- |
-| Background/session/media/queue tests | PASS (24/24) | Existing session/navigation/ranking coverage plus YouTube/HLS pipeline labels and preview source selection, terminal completion protection, 390px CSS containment, and low-cost preview policy |
-| Native-host and macOS release tests | PASS (14/14) | Existing lifecycle/retry/header coverage plus nonzero yt-dlp recovery, DASH single-track rejection, invalid-MP4 rejection, valid-MP4 preservation, source launcher policy, package exclusions, and beta.3 version agreement |
+| JavaScript background/content/bridge tests | PASS (29/29) | Existing session/navigation/ranking coverage plus YouTube finish/reconciliation, Bilibili paired-DASH bridge, quality-tier truthfulness, stale-playinfo rejection, selection snapshot, pipeline labels, preview policy, and terminal completion protection |
+| Native-host and macOS release tests | PASS (19/19) | Existing lifecycle/retry/header coverage plus Bilibili two-input ffmpeg headers, mandatory audio validation, legacy-host/page fallback, nonzero yt-dlp recovery, single-track rejection, source launcher policy, package exclusions, and beta.3 version agreement |
 | JavaScript syntax | PASS | background, content, page navigation, popup |
 | macOS package and isolated install | PASS | Staged source host reports beta.3; Homebrew yt-dlp plus packaged arm64 ffmpeg/ffprobe resolve correctly; isolated manifest points to `host-source`; no PyInstaller host or bundled yt-dlp exists |
-| Framed Native Messaging E2E | PASS | Direct MP4: 2.000s, 165,799 bytes; HLS→MP4: 2.043s, 166,343 bytes; invalid URL returns error; all in one persistent source-host process |
+| Framed Native Messaging E2E | PASS | Direct MP4: 2.000s, 165,688 bytes; HLS→MP4: 2.043s, 166,232 bytes; invalid URL returns error; all in one persistent source-host process |
 | YouTube page-extractor E2E | PASS | Public `jNQXAC9IVRw` page URL → MP4 → complete; 320×240, 19.014s, 475,990 bytes |
 | Headless popup layout and preview | PASS | 390px client/scroll width with long URL/path/error details expanded; no overflow offenders; local MP4 hover plays muted with `preload=none`, then leave pauses, clears `src`, and restores poster |
 | Page-player frame mirror smoke | PASS | Four JPEG frames captured from a playing page video; original `currentSrc` and play state unchanged; mouseleave-equivalent stop produced no further frames |
+| YouTube real SPA content smoke | PASS | `jNQXAC9IVRw → 0PT5c1z3LL8 → HTzw_grLzjw → TLBlFGwU7o0`; three recommendation clicks, no document reload, and every finish/title/DOM videoId matched the current URL |
+| Bilibili public DASH + Native Host E2E | PASS | Anonymous `BV1GJ411x7h7` reported only 480P/360P; selected 480P AVC + highest audio, then completed a 26,347,814-byte, 212.309s, 852×480 H.264/AAC MP4 with audio |
 
 These checks are regression coverage, not end-to-end acceptance.
 

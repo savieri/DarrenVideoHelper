@@ -218,8 +218,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (navigation.phase === "start") {
       invalidateVideoSession(sender.tab.id, navigation);
     } else {
-      commitVideoNavigation(sender.tab.id, navigation);
+      const senderIdentity = pageVideoIdentity(sender.tab.url || "");
+      const navigationIdentity = navigation.pageIdentity || pageVideoIdentity(navigation.pageUrl || "");
+      if (!senderIdentity || !navigationIdentity || senderIdentity === navigationIdentity) {
+        commitVideoNavigation(sender.tab.id, navigation);
+      }
     }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === "siteMediaContext" && sender.tab?.id != null) {
+    updateSiteMediaContext(sender.tab.id, message.media || {});
     sendResponse({ ok: true });
     return false;
   }
@@ -265,7 +275,7 @@ async function getPopupState(tabId, retryCount = 0) {
     .map((stream, index) => ({ ...stream, recommended: index === 0, rank: index + 1 }));
   const recommended = streams[0] || null;
 
-  const hasPageExtractor = Boolean(pageExtractorInfo(sessionSnapshot.pageUrl));
+  const hasPageExtractor = Boolean(makePageExtractorCandidate(sessionSnapshot));
   const hasDetectedVideo = hasPageExtractor || allSessionStreams.some((stream) => stream.kind !== "segment");
   const warning = hasDetectedVideo || streams.length
     ? ""
@@ -317,9 +327,19 @@ async function getActiveTab() {
 async function collectMediaHints(tab, state) {
   if (!tab.url || !/^https?:\/\//i.test(tab.url)) return state;
 
+  if (pageExtractorInfo(tab.url)?.provider === "bilibili" && typeof chrome.tabs.sendMessage === "function") {
+    try {
+      const response = await chrome.tabs.sendMessage(tab.id, { type: "refreshSiteMedia" });
+      if (response?.media) state = updateSiteMediaContext(tab.id, response.media);
+    } catch {
+      // The MAIN-world snapshot below remains available when the content bridge is still starting.
+    }
+  }
+
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
+      world: "MAIN",
       func: () => {
         const absolute = (value) => {
           if (!value) return "";
@@ -360,11 +380,80 @@ async function collectMediaHints(tab, state) {
           document.querySelector('meta[itemprop="videoId"]')?.content ||
           document.querySelector('meta[itemprop="identifier"]')?.content ||
           "";
+        const siteMedia = (() => {
+          try {
+            const parsed = new URL(location.href);
+            const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+            const match = parsed.pathname.match(/^\/video\/(BV[0-9A-Za-z]+|av\d+)/i);
+            if ((host !== "bilibili.com" && !host.endsWith(".bilibili.com")) || !match) return null;
+            const payload = window.__playinfo__;
+            const body = payload?.data?.dash ? payload.data
+              : payload?.result?.dash ? payload.result
+                : payload?.dash ? payload
+                  : null;
+            if (!body?.dash) return null;
+            const bilibiliQuality = (id, height) => ({
+              6: 240, 16: 360, 32: 480, 64: 720, 74: 720,
+              80: 1080, 112: 1080, 116: 1080, 120: 2160,
+              125: 2160, 126: 1080, 127: 4320
+            })[Number(id || 0)] || Number(height || 0);
+            const normalizeItems = (items, kind) => (Array.isArray(items) ? items : [])
+              .slice(0, 40)
+              .map((item) => ({
+                id: Number(item?.id || 0),
+                height: kind === "video" ? Number(item?.height || 0) : 0,
+                quality: kind === "video" ? bilibiliQuality(item?.id, item?.height) : 0,
+                width: kind === "video" ? Number(item?.width || 0) : 0,
+                bandwidth: Number(item?.bandwidth || 0),
+                codecid: Number(item?.codecid || 0),
+                codecs: String(item?.codecs || ""),
+                mimeType: String(item?.mimeType || item?.mime_type || ""),
+                baseUrl: absolute(item?.baseUrl || item?.base_url || ""),
+                backupUrls: (item?.backupUrl || item?.backup_url || [])
+                  .map(absolute)
+                  .filter((url) => /^https?:/i.test(url))
+                  .slice(0, 4)
+              }))
+              .filter((item) => /^https?:/i.test(item.baseUrl));
+            const dashVideos = normalizeItems(body.dash.video, "video");
+            const dashAudios = normalizeItems(body.dash.audio, "audio");
+            if (!dashVideos.length || !dashAudios.length) return null;
+            const initial = window.__INITIAL_STATE__ || {};
+            const videoKey = match[1].toLowerCase();
+            const initialBvid = String(initial.bvid || initial.videoData?.bvid || "").toLowerCase();
+            const initialAid = Number(initial.aid || initial.videoData?.aid || 0);
+            if (/^bv/i.test(videoKey) && initialBvid && videoKey !== initialBvid) return null;
+            const pageAid = Number(videoKey.match(/^av(\d+)$/i)?.[1] || 0);
+            if (pageAid && initialAid && pageAid !== initialAid) return null;
+            const qualities = Array.from(new Set(dashVideos.map((item) => item.quality).filter(Boolean)))
+              .sort((left, right) => right - left);
+            return {
+              provider: "bilibili",
+              pageIdentity: `bilibili:${videoKey}:p${parsed.searchParams.get("p") || "1"}`,
+              pageUrl: parsed.href,
+              bvid: String(initial.bvid || initial.videoData?.bvid || (/^bv/i.test(videoKey) ? videoKey : "")),
+              aid: Number(initial.aid || initial.videoData?.aid || videoKey.match(/^av(\d+)$/i)?.[1] || 0),
+              cid: Number(body.cid || initial.cid || initial.videoData?.cid || 0),
+              title: String(initial.videoData?.title || initial.title || document.title || ""),
+              thumbnailUrl: absolute(initial.videoData?.pic || initial.pic || ""),
+              duration: Number(body.dash.duration || body.timelength / 1000 || 0),
+              quality: qualities[0] || 0,
+              qualities,
+              videos: dashVideos,
+              audios: dashAudios,
+              observedAt: Date.now(),
+              reason: "popup-main-world"
+            };
+          } catch {
+            return null;
+          }
+        })();
         return {
           title: metaTitle,
           pageUrl: location.href,
           poster: absolute(videos.find((item) => item.poster)?.poster || metaImage),
           metadataVideoId,
+          siteMedia,
           videos
         };
       }
@@ -398,6 +487,7 @@ async function collectMediaHints(tab, state) {
       mainVideo: metadataMatchesPage ? mainVideo : null,
       reason: "popup-hints"
     });
+    if (hints.siteMedia) state = updateSiteMediaContext(tab.id, hints.siteMedia);
 
     for (const video of videos) {
       const urls = [video.currentSrc, ...(video.sourceUrls || [])].filter(Boolean);
@@ -567,8 +657,11 @@ function estimateSizeBytes(quality, duration, kind) {
 
 async function startDownload(tabId, selection, options = {}) {
   const settings = await loadSettings();
-  const state = tabState.get(tabId);
+  let state = tabState.get(tabId);
   if (!state) return staleSelectionResponse();
+  if (pageExtractorInfo(state.pageUrl)?.provider === "bilibili") {
+    state = await refreshSiteMediaForDownload(tabId, state);
+  }
   const resolved = validateDownloadSelection(state, selection || {});
   if (!resolved.ok) return resolved;
 
@@ -576,6 +669,17 @@ async function startDownload(tabId, selection, options = {}) {
     qualityPreference: selection?.qualityPreference || ""
   });
   return enqueueDownload(payload, settings, options);
+}
+
+async function refreshSiteMediaForDownload(tabId, state) {
+  if (typeof chrome.tabs.sendMessage !== "function") return state;
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, { type: "refreshSiteMedia" });
+    if (response?.media) return updateSiteMediaContext(tabId, response.media);
+  } catch {
+    // Use the most recent validated playinfo snapshot when the content bridge is unavailable.
+  }
+  return tabState.get(tabId) || state;
 }
 
 async function downloadRecommended(tabId, selection, options = {}) {
@@ -656,10 +760,19 @@ function buildDownloadPayload(state, stream, settings, options = {}) {
   const pageUrl = state.pageUrl || "";
   const streamUrl = stream.lastUrl || stream.url;
   const usePageExtractor = stream.kind === "page_extractor";
-  const targetUrl = usePageExtractor ? pageUrl : streamUrl;
+  const useBilibiliDash = stream.kind === "bilibili_dash";
+  const selectedBilibiliVideo = useBilibiliDash
+    ? selectBilibiliVideo(stream.videoRepresentations, options.qualityPreference || settings.defaultQuality)
+    : null;
+  const selectedBilibiliAudio = useBilibiliDash
+    ? selectBilibiliAudio(stream.audioRepresentations)
+    : null;
+  const targetUrl = usePageExtractor ? pageUrl
+    : useBilibiliDash ? (selectedBilibiliVideo?.baseUrl || streamUrl)
+      : streamUrl;
   const kind = usePageExtractor ? "page" : stream.kind;
   const headers = {
-    ...(stream.headers || state.headersByUrl.get(headerKey(stream.url)) || {})
+    ...(stream.headers || state.headersByUrl.get(headerKey(targetUrl)) || {})
   };
   const resourceUrl = stream.lastUrl || stream.url;
   const payload = {
@@ -678,7 +791,23 @@ function buildDownloadPayload(state, stream, settings, options = {}) {
     expectedDuration: stream.duration || state.videoDuration || 0,
     headers,
     referer: headers.referer || pageUrl,
-    preferPageUrl: usePageExtractor || stream.kind === "page",
+    preferPageUrl: usePageExtractor || stream.kind === "page" || useBilibiliDash,
+    allowPageFallback: useBilibiliDash,
+    directMedia: useBilibiliDash ? {
+      provider: "bilibili",
+      videoUrl: selectedBilibiliVideo?.baseUrl || "",
+      videoBackupUrls: selectedBilibiliVideo?.backupUrls || [],
+      audioUrl: selectedBilibiliAudio?.baseUrl || "",
+      audioBackupUrls: selectedBilibiliAudio?.backupUrls || [],
+      videoHeight: Number(selectedBilibiliVideo?.height || 0),
+      videoQuality: Number(selectedBilibiliVideo?.quality || selectedBilibiliVideo?.height || 0),
+      videoCodecId: Number(selectedBilibiliVideo?.codecid || 0),
+      audioCodecId: Number(selectedBilibiliAudio?.codecid || 0),
+      bvid: stream.bvid || "",
+      aid: Number(stream.aid || 0),
+      cid: Number(stream.cid || 0),
+      observedAt: Number(state.siteMedia?.observedAt || 0)
+    } : undefined,
     capturedAt: Date.now(),
     qualityPreference: options.qualityPreference || settings.defaultQuality,
     settings: { ...settings }
@@ -1092,6 +1221,18 @@ function snapshotVideoSession(state) {
     mainVideoHeight: state.mainVideoHeight,
     mainVideoWidth: state.mainVideoWidth,
     mainVideoObservedAt: state.mainVideoObservedAt,
+    siteMedia: state.siteMedia ? Object.freeze({
+      ...state.siteMedia,
+      qualities: Object.freeze([...(state.siteMedia.qualities || [])]),
+      videos: Object.freeze((state.siteMedia.videos || []).map((item) => Object.freeze({
+        ...item,
+        backupUrls: Object.freeze([...(item.backupUrls || [])])
+      }))),
+      audios: Object.freeze((state.siteMedia.audios || []).map((item) => Object.freeze({
+        ...item,
+        backupUrls: Object.freeze([...(item.backupUrls || [])])
+      })))
+    }) : null,
     invalidated: state.invalidated === true
   });
 }
@@ -1195,18 +1336,38 @@ function pageExtractorInfo(url) {
   if (!parsed) return null;
   const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
   let videoId = "";
+  let provider = "";
   if (host === "youtu.be") {
     videoId = parsed.pathname.split("/").filter(Boolean)[0] || "";
+    provider = "youtube";
   } else if (host === "youtube.com" || host.endsWith(".youtube.com")) {
     if (parsed.pathname === "/watch") videoId = parsed.searchParams.get("v") || "";
     else {
       const match = parsed.pathname.match(/^\/(?:shorts|live|embed)\/([^/?#]+)/i);
       videoId = match?.[1] || "";
     }
+    provider = "youtube";
+  } else if (host === "bilibili.com" || host.endsWith(".bilibili.com")) {
+    const match = parsed.pathname.match(/^\/video\/(BV[0-9A-Za-z]+|av\d+)/i);
+    videoId = match?.[1] || "";
+    provider = "bilibili";
   }
   if (!videoId) return null;
+  if (provider === "bilibili") {
+    const page = parsed.searchParams.get("p") || "1";
+    const canonicalUrl = new URL(`https://www.bilibili.com/video/${encodeURIComponent(videoId)}/`);
+    if (page !== "1") canonicalUrl.searchParams.set("p", page);
+    return {
+      provider,
+      videoId,
+      page,
+      canonicalUrl: canonicalUrl.href,
+      typeTag: "BILI",
+      label: "Bilibili DASH 音视频合并"
+    };
+  }
   return {
-    provider: "youtube",
+    provider,
     videoId,
     canonicalUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
     typeTag: "YT",
@@ -1216,15 +1377,65 @@ function pageExtractorInfo(url) {
 
 function pageVideoIdentity(url) {
   const extractor = pageExtractorInfo(url);
+  if (extractor?.provider === "bilibili") {
+    return `bilibili:${extractor.videoId.toLowerCase()}:p${extractor.page || "1"}`;
+  }
   if (extractor) return `${extractor.provider}:${extractor.videoId}`;
   return normalizePageUrl(url);
+}
+
+function selectBilibiliVideo(representations, qualityPreference = "best") {
+  const videos = (representations || []).filter((item) => item?.baseUrl && Number(item.height || 0) > 0);
+  if (!videos.length) return null;
+  const requested = Number(String(qualityPreference || "best").match(/(\d{3,4})/)?.[1] || 0);
+  const eligible = requested ? videos.filter((item) => Number(item.quality || item.height || 0) <= requested) : videos;
+  const pool = eligible.length ? eligible : videos;
+  return [...pool].sort((left, right) => {
+    const qualityDiff = Number(right.quality || right.height || 0) - Number(left.quality || left.height || 0);
+    if (qualityDiff) return qualityDiff;
+    const avcDiff = Number(Number(right.codecid || 0) === 7) - Number(Number(left.codecid || 0) === 7);
+    if (avcDiff) return avcDiff;
+    return Number(right.bandwidth || 0) - Number(left.bandwidth || 0);
+  })[0] || null;
+}
+
+function selectBilibiliAudio(representations) {
+  return [...(representations || [])]
+    .filter((item) => item?.baseUrl)
+    .sort((left, right) => Number(right.bandwidth || 0) - Number(left.bandwidth || 0))[0] || null;
+}
+
+function mediaHeaders(state, media) {
+  const urls = [
+    ...(media?.videos || []).flatMap((item) => [item.baseUrl, ...(item.backupUrls || [])]),
+    ...(media?.audios || []).flatMap((item) => [item.baseUrl, ...(item.backupUrls || [])])
+  ].filter(Boolean);
+  for (const url of urls) {
+    const headers = state?.headersByUrl?.get?.(headerKey(url));
+    if (headers && Object.keys(headers).length) return { ...headers, referer: headers.referer || state.pageUrl };
+  }
+  return { referer: state?.pageUrl || media?.pageUrl || "" };
 }
 
 function makePageExtractorCandidate(state) {
   const info = pageExtractorInfo(state.pageUrl);
   if (!info) return null;
+  const bilibiliMedia = info.provider === "bilibili" ? state.siteMedia : null;
+  if (info.provider === "bilibili" && (
+    bilibiliMedia?.pageIdentity !== state.pageIdentity
+    || !bilibiliMedia?.videos?.length
+    || !bilibiliMedia?.audios?.length
+  )) return null;
   const now = Date.now();
-  const id = `${PAGE_EXTRACTOR_ID_PREFIX}${info.provider}:${info.videoId}`;
+  const id = `${PAGE_EXTRACTOR_ID_PREFIX}${info.provider}:${info.videoId}${info.provider === "bilibili" ? `:p${info.page || "1"}` : ""}`;
+  const bestBilibiliVideo = selectBilibiliVideo(bilibiliMedia?.videos, "best");
+  const bestBilibiliAudio = selectBilibiliAudio(bilibiliMedia?.audios);
+  const quality = info.provider === "bilibili"
+    ? Number(bestBilibiliVideo?.quality || bestBilibiliVideo?.height || bilibiliMedia?.quality || 0)
+    : state.mainVideoHeight || 0;
+  const duration = info.provider === "bilibili"
+    ? Number(bilibiliMedia?.duration || state.videoDuration || 0)
+    : state.videoDuration || 0;
   const stream = {
     id,
     resourceId: id,
@@ -1233,19 +1444,20 @@ function makePageExtractorCandidate(state) {
     url: info.canonicalUrl,
     lastUrl: info.canonicalUrl,
     pageUrl: state.pageUrl,
-    kind: "page_extractor",
+    kind: info.provider === "bilibili" ? "bilibili_dash" : "page_extractor",
+    provider: info.provider,
     typeTag: info.typeTag,
     label: info.label,
-    quality: state.mainVideoHeight || 0,
-    qualityLabel: state.mainVideoHeight ? `${state.mainVideoHeight}p` : "Best",
+    quality,
+    qualityLabel: quality ? `${quality}p` : "Best",
     host: getHost(state.pageUrl),
-    sourceTitle: state.pageTitle || "YouTube video",
-    thumbnailUrl: safeImageUrl(state.thumbnailUrl),
-    duration: state.videoDuration || 0,
-    durationLabel: formatDuration(state.videoDuration || 0),
-    sizeBytes: estimateSizeBytes(state.mainVideoHeight || 1080, state.videoDuration || 0, "page_extractor"),
+    sourceTitle: state.pageTitle || (info.provider === "bilibili" ? "Bilibili video" : "YouTube video"),
+    thumbnailUrl: safeImageUrl(state.thumbnailUrl || bilibiliMedia?.thumbnailUrl),
+    duration,
+    durationLabel: formatDuration(duration),
+    sizeBytes: estimateSizeBytes(quality || 1080, duration, "page_extractor"),
     sizeLabel: formatBytes(
-      estimateSizeBytes(state.mainVideoHeight || 1080, state.videoDuration || 0, "page_extractor"),
+      estimateSizeBytes(quality || 1080, duration, "page_extractor"),
       true
     ),
     exactSize: false,
@@ -1256,7 +1468,15 @@ function makePageExtractorCandidate(state) {
     capturedAfterMain: true,
     canDownloadWholeVideo: true,
     isRecommendable: true,
-    headers: {}
+    headers: info.provider === "bilibili" ? mediaHeaders(state, bilibiliMedia) : {},
+    bvid: bilibiliMedia?.bvid || "",
+    aid: Number(bilibiliMedia?.aid || 0),
+    cid: Number(bilibiliMedia?.cid || 0),
+    availableQualities: bilibiliMedia?.qualities || [],
+    videoRepresentations: bilibiliMedia?.videos || [],
+    audioRepresentations: bilibiliMedia?.audios || [],
+    selectedVideo: bestBilibiliVideo,
+    selectedAudio: bestBilibiliAudio
   };
   return {
     ...stream,
@@ -1290,7 +1510,7 @@ function choosePreviewSource(state, rankedStreams, primary) {
   const extractor = pageExtractorInfo(state.pageUrl);
   let candidates = [];
 
-  if (extractor?.provider === "youtube") {
+  if (extractor?.provider === "youtube" || extractor?.provider === "bilibili") {
     return {
       previewUrl: "",
       previewSourceKind: "page_player",
@@ -1331,7 +1551,7 @@ function choosePreviewSource(state, rankedStreams, primary) {
 }
 
 function outputPipelineLabel(primary, extractor) {
-  if (extractor?.provider === "youtube") return "DASH → MP4";
+  if (extractor?.provider === "youtube" || extractor?.provider === "bilibili") return "DASH → MP4";
   if (isHlsKind(primary.kind)) return "HLS → MP4";
   if (primary.kind === "mp4") return "Direct MP4";
   return "Video → MP4";
@@ -1343,21 +1563,27 @@ function aggregateLogicalVideos(state, rankedStreams, settings = {}) {
 
   const qualityValues = Array.from(new Set(
     rankedStreams
-      .map((stream) => Number(stream.quality || 0))
+      .flatMap((stream) => [Number(stream.quality || 0), ...(stream.availableQualities || []).map(Number)])
       .filter((quality) => quality > 0)
   )).sort((left, right) => right - left);
   const qualityOptions = [{ value: "best", label: "最佳可用" }];
   for (const quality of qualityValues) {
     qualityOptions.push({ value: `${quality}p`, label: `${quality}p` });
   }
-  const defaultQuality = settings.defaultQuality || "best";
-  if (!qualityOptions.some((option) => option.value === defaultQuality)) {
+  const extractor = pageExtractorInfo(state.pageUrl);
+  const savedDefaultQuality = settings.defaultQuality || "best";
+  const defaultQuality = extractor?.provider === "bilibili"
+    && !qualityOptions.some((option) => option.value === savedDefaultQuality)
+    ? "best"
+    : savedDefaultQuality;
+  if (extractor?.provider !== "bilibili" && !qualityOptions.some((option) => option.value === defaultQuality)) {
     qualityOptions.push({ value: defaultQuality, label: defaultQuality });
   }
 
-  const extractor = pageExtractorInfo(state.pageUrl);
   const providerLabel = extractor?.provider === "youtube"
     ? "YouTube"
+    : extractor?.provider === "bilibili"
+      ? "Bilibili"
     : (getHost(state.pageUrl) || primary.host || "网页视频");
   const pipelineLabel = outputPipelineLabel(primary, extractor);
   const previewSource = choosePreviewSource(state, rankedStreams, primary);
@@ -1390,7 +1616,9 @@ function aggregateLogicalVideos(state, rankedStreams, settings = {}) {
     duration: state.videoDuration || primary.duration || 0,
     durationLabel: formatDuration(state.videoDuration || primary.duration || 0),
     quality: primary.quality || state.mainVideoHeight || 0,
-    qualityLabel: primary.qualityLabel || (state.mainVideoHeight ? `${state.mainVideoHeight}p` : "最佳"),
+    qualityLabel: primary.quality
+      ? `${primary.quality}p`
+      : (primary.qualityLabel || (state.mainVideoHeight ? `${state.mainVideoHeight}p` : "最佳")),
     qualityOptions,
     defaultQuality,
     evidenceCount: rankedStreams.length,
@@ -1418,6 +1646,7 @@ function candidateScore(stream, state) {
   let score = 0;
   if (stream.kind === "page") return -1000000;
   if (stream.kind === "page_extractor") score += 180000;
+  if (stream.kind === "bilibili_dash") score += 180000;
   if (stream.kind === "mp4") score += stream.stronglyAssociated ? 140000 : 105000;
   if (stream.kind === "hls_master") score += 100000;
   if (stream.kind === "hls_media") score += stream.parentMasterId ? 95000 : 85000;
@@ -1479,6 +1708,8 @@ function createVideoSession(tabId, context = {}) {
     mainVideoWidth: 0,
     mainVideoObservedAt: currentSrc ? createdAt : 0,
     mainPoster: resetMetadata ? "" : (context.poster || ""),
+    siteMedia: null,
+    siteMediaSignature: "",
     invalidated: false,
     invalidatedAt: 0,
     pendingPageUrl: "",
@@ -1687,6 +1918,94 @@ function updateVideoContext(tabId, context = {}) {
   return state;
 }
 
+function sanitizeDashRepresentation(item, kind) {
+  const base = safeUrl(item?.baseUrl || "");
+  if (!base || !/^https?:$/.test(base.protocol)) return null;
+  const backupUrls = (item?.backupUrls || [])
+    .map((url) => safeUrl(url))
+    .filter((url) => url && /^https?:$/.test(url.protocol))
+    .map((url) => url.href)
+    .slice(0, 4);
+  return {
+    id: Number(item?.id || 0),
+    height: kind === "video" ? Number(item?.height || 0) : 0,
+    quality: kind === "video" ? Number(item?.quality || item?.height || 0) : 0,
+    width: kind === "video" ? Number(item?.width || 0) : 0,
+    bandwidth: Number(item?.bandwidth || 0),
+    codecid: Number(item?.codecid || 0),
+    codecs: String(item?.codecs || "").slice(0, 80),
+    mimeType: String(item?.mimeType || "").slice(0, 80),
+    baseUrl: base.href,
+    backupUrls
+  };
+}
+
+function sanitizeSiteMedia(media) {
+  if (media?.provider !== "bilibili" || !String(media.pageIdentity || "").startsWith("bilibili:")) return null;
+  const videos = (media.videos || [])
+    .slice(0, 40)
+    .map((item) => sanitizeDashRepresentation(item, "video"))
+    .filter((item) => item && item.height > 0 && item.quality > 0);
+  const audios = (media.audios || [])
+    .slice(0, 12)
+    .map((item) => sanitizeDashRepresentation(item, "audio"))
+    .filter(Boolean);
+  if (!videos.length || !audios.length) return null;
+  const qualities = Array.from(new Set(videos.map((item) => item.quality))).sort((left, right) => right - left);
+  return {
+    provider: "bilibili",
+    pageIdentity: String(media.pageIdentity),
+    pageUrl: String(media.pageUrl || ""),
+    bvid: String(media.bvid || "").slice(0, 32),
+    aid: Number(media.aid || 0),
+    cid: Number(media.cid || 0),
+    title: String(media.title || "").slice(0, 500),
+    thumbnailUrl: safeImageUrl(media.thumbnailUrl || ""),
+    duration: Math.max(0, Number(media.duration || 0)),
+    quality: qualities[0] || 0,
+    qualities,
+    videos,
+    audios,
+    observedAt: Number(media.observedAt || Date.now()),
+    reason: String(media.reason || "page-playinfo").slice(0, 80)
+  };
+}
+
+function updateSiteMediaContext(tabId, rawMedia = {}) {
+  const media = sanitizeSiteMedia(rawMedia);
+  let state = tabState.get(tabId);
+  if (!media) return state || ensureTabState(tabId);
+  if (!state) {
+    state = ensureVideoSession(tabId, {
+      pageUrl: media.pageUrl,
+      pageIdentity: media.pageIdentity,
+      reason: "site-media"
+    });
+  }
+  if (state.invalidated || media.pageIdentity !== state.pageIdentity) return state;
+
+  const signature = [
+    media.pageIdentity,
+    media.cid,
+    media.quality,
+    media.videos[0]?.baseUrl,
+    media.audios[0]?.baseUrl
+  ].join("|");
+  const changed = signature !== state.siteMediaSignature;
+  state.siteMedia = media;
+  state.siteMediaSignature = signature;
+  if (media.title) state.pageTitle = media.title;
+  if (media.thumbnailUrl) {
+    state.thumbnailUrl = media.thumbnailUrl;
+    state.mainPoster = media.thumbnailUrl;
+  }
+  if (media.duration) state.videoDuration = media.duration;
+  if (media.quality) state.mainVideoHeight = media.quality;
+  state.fingerprint = videoFingerprint(state.pageUrl, state.currentSrc);
+  if (changed) broadcastSessionState("videoSessionChanged", state);
+  return state;
+}
+
 function captureNetworkStream(tabId, url, details = {}) {
   const state = ensureVideoSession(tabId, {
     pageUrl: details.frameId === 0 ? details.documentUrl : ""
@@ -1874,6 +2193,7 @@ function streamTypeTag(kind) {
   if (kind === "hls_master" || kind === "hls_media") return "HLS";
   if (kind === "mp4") return "MP4";
   if (kind === "page_extractor") return "YT";
+  if (kind === "bilibili_dash") return "BILI";
   if (kind === "dash_video") return "DASH-V";
   if (kind === "dash_audio") return "DASH-A";
   if (kind === "page") return "PAGE";

@@ -384,6 +384,112 @@ test("YouTube resolver and DASH evidence aggregate into one logical MP4 video", 
   assert.deepEqual(Array.from(result.qualityValues), ["best", "1080p", "720p"]);
 });
 
+test("Bilibili playinfo creates one real DASH to MP4 candidate at the actual available quality", () => {
+  const { context } = loadBackground();
+  const result = evaluate(context, `(() => {
+    const state = commitVideoNavigation(30, {
+      pageUrl: "https://www.bilibili.com/video/BV1test12345/",
+      pageIdentity: "bilibili:bv1test12345:p1",
+      reason: "content-ready"
+    });
+    const before = makePageExtractorCandidate(snapshotVideoSession(state));
+    updateSiteMediaContext(30, {
+      provider: "bilibili",
+      pageIdentity: "bilibili:bv1test12345:p1",
+      pageUrl: state.pageUrl,
+      bvid: "BV1test12345",
+      aid: 100,
+      cid: 200,
+      title: "Public Bilibili Video",
+      thumbnailUrl: "https://i0.hdslb.com/test.jpg",
+      duration: 300,
+      videos: [
+        { id: 80, height: 1080, width: 1920, bandwidth: 3000000, codecid: 12, baseUrl: "https://v.example/1080-av1.m4s", backupUrls: [] },
+        { id: 80, height: 1080, width: 1920, bandwidth: 2800000, codecid: 7, baseUrl: "https://v.example/1080-avc.m4s", backupUrls: ["https://v-backup.example/1080.m4s"] },
+        { id: 64, height: 720, width: 1280, bandwidth: 1800000, codecid: 7, baseUrl: "https://v.example/720.m4s", backupUrls: [] }
+      ],
+      audios: [
+        { id: 30280, bandwidth: 192000, codecid: 0, baseUrl: "https://a.example/audio.m4s", backupUrls: ["https://a-backup.example/audio.m4s"] }
+      ],
+      observedAt: Date.now()
+    });
+    const active = tabState.get(30);
+    const candidate = makePageExtractorCandidate(active);
+    const cards = aggregateLogicalVideos(
+      snapshotVideoSession(active),
+      rankStreams([makePageExtractorCandidate(snapshotVideoSession(active))], active),
+      { defaultQuality: "2160p", showAdvanced: true }
+    );
+    const payload = buildDownloadPayload(active, candidate, { defaultQuality: "best" }, { qualityPreference: "720p" });
+    return {
+      before,
+      kind: candidate.kind,
+      bestCodec: candidate.selectedVideo.codecid,
+      cardCount: cards.length,
+      providerLabel: cards[0].providerLabel,
+      pipelineLabel: cards[0].pipelineLabel,
+      quality: cards[0].quality,
+      defaultQuality: cards[0].defaultQuality,
+      qualityValues: cards[0].qualityOptions.map((item) => item.value),
+      payloadKind: payload.kind,
+      selectedHeight: payload.directMedia.videoHeight,
+      videoUrl: payload.directMedia.videoUrl,
+      audioUrl: payload.directMedia.audioUrl,
+      referer: payload.referer,
+      preferPageUrl: payload.preferPageUrl,
+      allowPageFallback: payload.allowPageFallback
+    };
+  })()`);
+  assert.equal(result.before, null);
+  assert.equal(result.kind, "bilibili_dash");
+  assert.equal(result.bestCodec, 7);
+  assert.equal(result.cardCount, 1);
+  assert.equal(result.providerLabel, "Bilibili");
+  assert.equal(result.pipelineLabel, "DASH → MP4");
+  assert.equal(result.quality, 1080);
+  assert.equal(result.defaultQuality, "best");
+  assert.deepEqual(Array.from(result.qualityValues), ["best", "1080p", "720p"]);
+  assert.equal(result.payloadKind, "bilibili_dash");
+  assert.equal(result.selectedHeight, 720);
+  assert.equal(result.videoUrl, "https://v.example/720.m4s");
+  assert.equal(result.audioUrl, "https://a.example/audio.m4s");
+  assert.equal(result.referer, "https://www.bilibili.com/video/BV1test12345/");
+  assert.equal(result.preferPageUrl, true);
+  assert.equal(result.allowPageFallback, true);
+});
+
+test("stale Bilibili playinfo cannot refill a newly committed BV session", () => {
+  const { context } = loadBackground();
+  const result = evaluate(context, `(() => {
+    commitVideoNavigation(31, {
+      pageUrl: "https://www.bilibili.com/video/BVold/",
+      pageIdentity: "bilibili:bvold:p1"
+    });
+    const next = commitVideoNavigation(31, {
+      pageUrl: "https://www.bilibili.com/video/BVnew/",
+      pageIdentity: "bilibili:bvnew:p1"
+    });
+    updateSiteMediaContext(31, {
+      provider: "bilibili",
+      pageIdentity: "bilibili:bvold:p1",
+      pageUrl: "https://www.bilibili.com/video/BVold/",
+      videos: [{ height: 1080, baseUrl: "https://v.example/old.m4s" }],
+      audios: [{ bandwidth: 192000, baseUrl: "https://a.example/old.m4s" }]
+    });
+    return {
+      identity: tabState.get(31).pageIdentity,
+      sessionId: tabState.get(31).sessionId,
+      expectedSessionId: next.sessionId,
+      hasSiteMedia: Boolean(tabState.get(31).siteMedia),
+      hasCandidate: Boolean(makePageExtractorCandidate(tabState.get(31)))
+    };
+  })()`);
+  assert.equal(result.identity, "bilibili:bvnew:p1");
+  assert.equal(result.sessionId, result.expectedSessionId);
+  assert.equal(result.hasSiteMedia, false);
+  assert.equal(result.hasCandidate, false);
+});
+
 test("HLS master and variants aggregate into one main-video card", () => {
   const { context } = loadBackground();
   const result = evaluate(context, `(() => {

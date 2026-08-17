@@ -79,6 +79,88 @@ class NativeHostTests(unittest.TestCase):
         selector_index = command.index("-f")
         self.assertIn("height<=1080", command[selector_index + 1])
 
+    def test_bilibili_ffmpeg_command_merges_video_audio_with_page_headers(self):
+        message = {
+            "pageUrl": "https://www.bilibili.com/video/BVtest/",
+            "headers": {
+                "referer": "https://www.bilibili.com/video/BVtest/",
+                "user-agent": "VideoHelperTest/1.0",
+                "cookie": "SESSDATA=secret",
+            },
+        }
+        with mock.patch.object(HOST, "tool_path", return_value="/tools/ffmpeg"):
+            command = HOST.build_ffmpeg_dash_command(
+                message,
+                "https://video.example/video.m4s",
+                "https://audio.example/audio.m4s",
+                Path("/tmp/output.mp4"),
+            )
+
+        self.assertEqual(command.count("-i"), 2)
+        self.assertIn("https://video.example/video.m4s", command)
+        self.assertIn("https://audio.example/audio.m4s", command)
+        self.assertIn("0:v:0", command)
+        self.assertIn("1:a:0", command)
+        headers = command[command.index("-headers") + 1]
+        self.assertIn("Referer: https://www.bilibili.com/video/BVtest/", headers)
+        self.assertIn("User-Agent: VideoHelperTest/1.0", headers)
+        self.assertIn("Cookie: SESSDATA=secret", headers)
+        self.assertNotIn("SESSDATA=secret", " ".join(HOST.redacted_command(command)))
+
+    def test_bilibili_final_output_requires_audio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "video.mp4"
+            output.write_bytes(b"0" * (128 * 1024))
+            with mock.patch.object(HOST, "ffprobe_info", return_value={
+                "fileSize": output.stat().st_size,
+                "duration": 20,
+                "width": 1280,
+                "height": 720,
+                "hasAudio": False,
+            }):
+                with self.assertRaisesRegex(RuntimeError, "没有音频"):
+                    HOST.validate_final_output("job", output, require_audio=True)
+            self.assertFalse(output.exists())
+
+    def test_bilibili_direct_failure_falls_back_to_page_even_with_legacy_prefer_page_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "fallback.mp4"
+            message = {
+                "jobId": "job:bili-fallback",
+                "action": "download",
+                "url": "https://video.example/video.m4s",
+                "pageUrl": "https://www.bilibili.com/video/BVtest/",
+                "pageTitle": "Bilibili fallback",
+                "kind": "bilibili_dash",
+                "preferPageUrl": True,
+                "allowPageFallback": True,
+                "directMedia": {
+                    "videoUrl": "https://video.example/video.m4s",
+                    "audioUrl": "https://audio.example/audio.m4s",
+                },
+                "settings": {"outputDir": directory, "autoCookies": False},
+            }
+            with (
+                mock.patch.object(HOST, "tool_path", return_value="/tool"),
+                mock.patch.object(HOST, "progress"),
+                mock.patch.object(
+                    HOST,
+                    "run_bilibili_dash_attempt",
+                    return_value=(None, "HTTP Error 403", time.time()),
+                ),
+                mock.patch.object(
+                    HOST,
+                    "run_ytdlp_with_retries",
+                    return_value=(output, "ok", time.time()),
+                ) as page_runner,
+                mock.patch.object(HOST, "validate_final_output", return_value=(output, {"hasAudio": True})),
+                mock.patch.object(HOST, "cleanup_sidecars"),
+                mock.patch.object(HOST, "complete"),
+            ):
+                HOST.run_download(message)
+
+            self.assertEqual(page_runner.call_args.args[2], message["pageUrl"])
+
     def test_small_output_cannot_be_completed(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "tiny.mp4"
