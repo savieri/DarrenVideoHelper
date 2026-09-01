@@ -16,7 +16,6 @@ native/host_launcher.sh
 native/install_host.sh
 
 release/*
-!release/DarrenVideoHelper-macOS.zip
 
 Downloads/
 *.part
