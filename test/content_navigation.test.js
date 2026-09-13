@@ -65,7 +65,9 @@ function loadContent(initialHref) {
     },
     dispatchWindowMessage(data) {
       for (const listener of windowListeners.get("message") || []) {
-        listener({ source: context.window, data });
+        context.__messageListener = listener;
+        context.__messageData = data;
+        vm.runInContext("__messageListener({ source: window, data: __messageData })", context);
       }
     }
   };
@@ -82,4 +84,22 @@ test("YouTube finish is delivered after a post-commit duplicate start for the sa
   const navigations = harness.sent.filter((message) => message.type === "videoNavigation");
   assert.deepEqual(navigations.map((message) => message.navigation.phase), ["commit", "start", "finish"]);
   assert.equal(navigations.at(-1).navigation.pageIdentity, "youtube:videoB");
+});
+
+test("generic HLS navigation preserves the MAIN-world boundary timestamp", () => {
+  const harness = loadContent("https://missav.ws/ch/a");
+  harness.sent.length = 0;
+  harness.dispatchWindowMessage({
+    source: "darren-video-helper-navigation", type: "navigation", phase: "start",
+    href: "https://missav.ws/ch/a", previousHref: "https://missav.ws/ch/a", reason: "history.pushState", at: 123456
+  });
+  harness.context.location.href = "https://missav.ws/ch/b";
+  harness.dispatchWindowMessage({
+    source: "darren-video-helper-navigation", type: "navigation", phase: "commit",
+    href: "https://missav.ws/ch/b", previousHref: "https://missav.ws/ch/a", reason: "history.pushState", at: 123457
+  });
+  const messages = harness.sent.filter(message => message.type === "videoNavigation");
+  assert.equal(messages[0].navigation.observedAt, 123456);
+  assert.equal(messages[1].navigation.pageIdentity, "https://missav.ws/ch/b");
+  assert.equal(messages[1].navigation.observedAt, 123457);
 });
