@@ -213,7 +213,7 @@
     return false;
   });
 
-  function navigationContext(phase, reason, href = location.href, previousHref = "") {
+  function navigationContext(phase, reason, href = location.href, previousHref = "", observedAt = Date.now()) {
     const videoId = youtubeVideoId(href);
     return {
       type: "videoNavigation",
@@ -224,12 +224,12 @@
         previousPageUrl: previousHref,
         pageIdentity: pageIdentity(href),
         videoId,
-        observedAt: Date.now()
+        observedAt
       }
     };
   }
 
-  function publishNavigation(phase, reason, href = location.href, previousHref = "") {
+  function publishNavigation(phase, reason, href = location.href, previousHref = "", observedAt = Date.now()) {
     const identity = pageIdentity(href);
     if (phase === "start") {
       navigationPending = true;
@@ -237,7 +237,7 @@
     } else if (!navigationPending && identity === lastCommittedIdentity && href === lastCommittedHref && reason !== "bridge-ready") {
       return;
     }
-    send(navigationContext(phase, reason, href, previousHref));
+    send(navigationContext(phase, reason, href, previousHref, observedAt));
     if (phase !== "start") {
       navigationPending = false;
       lastCommittedIdentity = identity;
@@ -313,7 +313,7 @@
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
     if (event.data?.source === NAVIGATION_SOURCE && event.data?.type === "navigation") {
-      publishNavigation(event.data.phase, event.data.reason, event.data.href, event.data.previousHref || "");
+      publishNavigation(event.data.phase, event.data.reason, event.data.href, event.data.previousHref || "", event.data.at || Date.now());
       schedule();
       return;
     }

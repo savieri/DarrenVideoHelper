@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased - beta.3 video detection fix
+
+- Restores HLS/MP4 candidates and request headers from bounded `chrome.storage.session` snapshots before processing worker-startup events. Closed tabs and mismatched page/document identities are discarded; segment samples are never persisted.
+- Actively scans MAIN-world resource timing on every popup open/refresh, including playlists loaded before the popup and videos exposing only a `blob:` source. Playlists take priority over newer segments; recovery respects SPA navigation timestamps and excludes the previous video's URLs.
+- Detects extensionless HLS/MP4 from response MIME types and parses extensionless playlists to distinguish master/media candidates.
+- Confirms origin-only extensionless SPA candidates against post-boundary MAIN-world resource timing, including after a worker restart; new media capture refreshes an already-open popup.
+- Buffers navigation-time requests for up to 30 seconds and 40 candidates, preserving playlists over segment floods. Only candidates with matching new document/page context are merged after commit; lightweight media candidates survive a worker restart during navigation.
+- Enables the existing history navigation bridge for ordinary HLS pages and retains the original MAIN-world boundary timestamp. Failed document navigation reactivates the old session.
+- Keeps HLS playlists in memory when segment samples fill the tab limit, and excludes conventional MP4 initialization fragments from whole-video recommendations.
+- Adds detection regressions and a real MV3 Chrome smoke test with playable local HLS/MSE, an actual stopped/restarted worker, extensionless MIME capture, and automatic popup updates across SPA video switches.
+
 ## 1.2.0-beta.3 - 2026-08-17
 
 Prerelease only. Built and tagged from `codex/v1.2.0-beta.3`; `main` is unchanged.
