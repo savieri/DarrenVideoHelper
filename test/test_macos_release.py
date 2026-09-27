@@ -45,10 +45,10 @@ class MacOSReleasePolicyTests(unittest.TestCase):
         self.assertIn("README-FIRST.md", sync)
         self.assertIn("CHANGELOG.md", sync)
 
-    def test_beta3_versions_match(self):
+    def test_beta4_extension_uses_compatible_beta3_native_host(self):
         manifest = json.loads((ROOT / "extension" / "manifest.json").read_text(encoding="utf-8"))
         host = (ROOT / "native" / "host.py").read_text(encoding="utf-8")
-        self.assertEqual(manifest["version_name"], "1.2.0-beta.3")
+        self.assertEqual(manifest["version_name"], "1.2.1-beta.4")
         self.assertIn('HOST_VERSION = "1.2.0-beta.3"', host)
 
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.1-beta.4 - 2026-09-27
+
+- Recovers current-player HLS playlists from page fetch/XHR responses and bound player instances, including nested frames and extensionless URLs.
+- Prioritizes the main player over advertising/live widgets, retains its playlists during candidate floods, and excludes known media segments from full-video choices.
+- Invalidates old selections when a bound playlist changes and prevents stale popup responses from replacing newer results.
+- Uses Range GET for media size probes and adds diagnostic export with URL query credentials redacted.
+- Requires Chrome 119 or later; retains the compatible 1.2.0-beta.3 native host.
+- Validation: 55 JavaScript tests and 20 Python tests pass. The browser detection smoke test could not launch because the required Playwright Chromium executable is not installed.
+
 ## Unreleased - beta.3 video detection fix
 
 - Restores HLS/MP4 candidates and request headers from bounded `chrome.storage.session` snapshots before processing worker-startup events. Closed tabs and mismatched page/document identities are discarded; segment samples are never persisted.

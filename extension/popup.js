@@ -3,6 +3,7 @@ let currentState = null;
 const jobCache = new Map();
 let sessionRefreshTimer = 0;
 let activePreview = null;
+let streamLoadGeneration = 0;
 const PREVIEW_HOVER_DELAY_MS = 240;
 const PREVIEW_MAX_PLAY_MS = 8000;
 
@@ -21,6 +22,17 @@ const queueStateEl = document.getElementById("queueState");
 document.addEventListener("DOMContentLoaded", init);
 refreshButton.addEventListener("click", loadStreams);
 optionsButton.addEventListener("click", () => chrome.runtime.openOptionsPage());
+document.getElementById("versionLabel").textContent = chrome.runtime.getManifest().version_name;
+document.getElementById("diagnosticsButton").addEventListener("click", async () => {
+  try {
+    const result = await sendMessage({ type: "getDiagnostics", tabId: currentTabId });
+    if (!result.ok) throw new Error(result.error);
+    const url = URL.createObjectURL(new Blob([JSON.stringify(result.diagnostics, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url; link.download = "DarrenVideoHelper-diagnostics.json"; link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) { showNotice(error.message, "error"); }
+});
 pauseQueueButton.addEventListener("click", async () => {
   await sendMessage({ type: "pauseQueue" });
   await refreshJobs();
@@ -68,11 +80,14 @@ async function init() {
 }
 
 async function loadStreams() {
+  const generation = ++streamLoadGeneration;
   showNotice("正在检测...", "muted");
   streamsEl.innerHTML = "";
 
   try {
-    currentState = await sendMessage({ type: "getStreams", tabId: currentTabId });
+    const result = await sendMessage({ type: "getStreams", tabId: currentTabId });
+    if (generation !== streamLoadGeneration) return;
+    currentState = result;
     if (!currentState.ok) throw new Error(currentState.error || "Could not read streams.");
 
     pageTitleEl.textContent = currentState.pageTitle || currentState.pageUrl || "Current tab";

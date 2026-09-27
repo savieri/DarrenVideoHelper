@@ -24,6 +24,7 @@
     <section class="utility-actions" aria-label="下载队列工具">
       <button id="pauseQueueButton" type="button">暂停</button>
       <button id="resumeQueueButton" type="button">继续</button>
+      <button id="diagnosticsButton" type="button">导出诊断</button>
       <label class="import-button">
         导入
         <input id="importFile" type="file" accept=".txt,.csv,text/plain,text/csv" hidden>
@@ -42,7 +43,7 @@
 
     <footer>
       <span>自动跟随当前页面主视频</span>
-      <span>非 DRM · 输出 MP4</span>
+      <span id="versionLabel">非 DRM · 输出 MP4</span>
     </footer>
 
     <script src="popup.js"></script>

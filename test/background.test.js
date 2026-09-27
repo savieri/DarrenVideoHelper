@@ -1118,3 +1118,98 @@ test("popup preview is muted, bounded, single-instance, and silently falls back 
   assert.doesNotMatch(content, /video\.play\(/);
   assert.doesNotMatch(content, /video\.pause\(/);
 });
+
+test("advertising MP4 flood cannot evict the main HLS master or its variants", async () => {
+  const h = loadBackground(); await evaluate(h.context, "detectionReady");
+  evaluate(h.context, `upsertStream(1, 'https://cdn.test/main/playlist.m3u8', {forcedKind:'hls_master', association:'main-player'});
+    upsertStream(1, 'https://cdn.test/main/1080p/video.m3u8', {forcedKind:'hls_media', association:'main-player'});
+    for(let i=0;i<350;i++) upsertStream(1, 'https://live.test/live_'+i+'_abc_1789392384.mp4', {});`);
+  assert.equal(evaluate(h.context, "tabState.get(1).streams.size"), 100);
+  assert.equal(evaluate(h.context, "[...tabState.get(1).streams.values()].filter(s=>s.association==='main-player').length"), 2);
+  assert.equal(evaluate(h.context, "inferStreamMetadata('https://live.test/132789258_240p_h264_init_abc.mp4').kind"), "segment");
+  assert.equal(evaluate(h.context, "inferStreamMetadata('https://live.test/132789258_240p_h264_813_abc_1789392384.mp4').kind"), "segment");
+});
+
+test("playlist segment ownership demotes MP4 and disguised JPEG fragments", async () => {
+  const h = loadBackground(); await evaluate(h.context, "detectionReady");
+  evaluate(h.context, `upsertStream(1, 'https://cdn.test/live/file.mp4', {});
+    recordPlaylist(tabState.get(1), 'https://cdn.test/live/media', parsePlaylistInfo('#EXTM3U\\n#EXT-X-MAP:URI="init.mp4"\\n#EXTINF:2,\\nfile.mp4\\n#EXTINF:2,\\nvideo1.jpeg', 'https://cdn.test/live/media'));
+    upsertStream(1, 'https://cdn.test/live/file.mp4', {forcedKind:'mp4'});`);
+  assert.equal(evaluate(h.context, "tabState.get(1).streams.get(streamKey('https://cdn.test/live/file.mp4')).kind"), "segment");
+  assert.equal(evaluate(h.context, "tabState.get(1).segmentOwners.get('https://cdn.test/live/video1.jpeg')"), "https://cdn.test/live/media");
+});
+
+test("paused feature wins over smaller autoplay live widgets", async () => {
+  const h = loadBackground(); await evaluate(h.context, "detectionReady");
+  assert.ok(evaluate(h.context, "compareMainVideos({width:1920,height:1080,duration:10532,paused:true},{width:426,height:240,duration:0,paused:false})") < 0);
+});
+
+test("bound Hls instance recovers an evicted playlist after resource timing was cleared", async () => {
+  const h = loadBackground(); await evaluate(h.context, "detectionReady");
+  const {video} = installMediaPage(h);
+  video.paused = true;
+  h.context.window.hls = { media:video, url:"https://cdn.test/main/playlist.m3u8", levels:[
+    {height:360,url:["https://cdn.test/main/360p/video.m3u8"]},
+    {height:1080,url:["https://cdn.test/main/1080p/video.m3u8"]}
+  ]};
+  const p = await evaluate(h.context, "getPopupState(1)");
+  assert.equal(p.recommended.resourceUrl, "https://cdn.test/main/playlist.m3u8");
+  assert.equal(p.recommended.stronglyAssociated, true);
+  assert.ok(p.recommended.qualityOptions.some(o=>o.value === "360p"));
+  assert.ok(p.recommended.qualityOptions.some(o=>o.value === "1080p"));
+  h.context.window.hls.media = {}; // Unrelated advertising player is not trusted as primary.
+  evaluate(h.context, "tabState.get(1).streams.clear()");
+  const unrelated = await evaluate(h.context, "getPopupState(1)");
+  assert.equal(unrelated.recommended, null);
+});
+
+test("top and cross-origin nested frame snapshots preserve top page identity", async () => {
+  const h = loadBackground({tabs:[{id:1,url:"https://site.test/a",documentId:"top"}]});
+  await evaluate(h.context, "detectionReady");
+  h.chrome.scripting.executeScript = async () => [
+    {frameId:0,documentId:"top",result:{pageUrl:"https://site.test/a",title:"Feature",videos:[],resources:[]}},
+    {frameId:8,documentId:"nested",result:{pageUrl:"https://player.test/embed",videos:[{
+      currentSrc:"blob:https://player.test/feature",duration:600,width:1280,height:720,paused:false,
+      playerSources:[{url:"https://cdn.test/main/playlist",variants:[]}]
+    }],resources:[]}}
+  ];
+  const p=await evaluate(h.context,"getPopupState(1)");
+  assert.equal(p.pageUrl,"https://site.test/a");
+  assert.equal(p.recommended.resourceUrl,"https://cdn.test/main/playlist");
+  assert.equal(evaluate(h.context,"tabState.get(1).mainFrameId"),8);
+});
+
+test("Range GET derives full size and cancels the response without using HEAD", async () => {
+  const h=loadBackground(); await evaluate(h.context,"detectionReady");
+  let cancelled=false;
+  h.context.fetch=async (url,options)=>{
+    assert.equal(options.method,"GET"); assert.equal(options.headers.range,"bytes=0-0");
+    return {ok:true,status:206,headers:{get:n=>n==='content-range'?'bytes 0-0/12345678':'1'},body:{cancel:async()=>{cancelled=true}}};
+  };
+  assert.equal(await evaluate(h.context,"fetchContentLength('https://cdn.test/no-extension')"),12345678);
+  assert.equal(cancelled,true);
+});
+
+test("master classification is not downgraded by generic HLS MIME",async()=>{
+  const h=loadBackground();await evaluate(h.context,"detectionReady");
+  evaluate(h.context,"upsertStream(1,'https://cdn.test/master.m3u8',{});upsertStream(1,'https://cdn.test/master.m3u8',{forcedKind:'hls'});");
+  assert.equal(evaluate(h.context,"[...tabState.get(1).streams.values()][0].kind"),"hls_master");
+});
+
+test("changing a bound HLS playlist on the same page stales the old download selection",async()=>{
+  const h=loadBackground();await evaluate(h.context,"detectionReady");
+  const {video}=installMediaPage(h);
+  h.context.window.hls={media:video,url:'https://cdn.test/a/master.m3u8',levels:[]};
+  const first=await evaluate(h.context,"getPopupState(1)");
+  h.context.window.hls.url='https://cdn.test/b/master.m3u8';
+  const next=await evaluate(h.context,"getPopupState(1)");
+  assert.notEqual(first.sessionId,next.sessionId);
+  assert.equal(next.recommended.resourceUrl,'https://cdn.test/b/master.m3u8');
+  assert.equal(evaluate(h.context,"[...tabState.get(1).streams.values()].some(s=>s.url.includes('/a/'))"),false);
+});
+
+test("exported diagnostic URLs redact query credentials and userinfo",async()=>{
+  const h=loadBackground();await evaluate(h.context,"detectionReady");
+  assert.equal(evaluate(h.context,"diagnosticUrl('https://alice:secret@cdn.test/playlist?token=abc#secret')"),
+    'https://cdn.test/playlist?token=%5Bredacted%5D');
+});

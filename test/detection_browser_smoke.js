@@ -25,7 +25,10 @@ async function main() {
     <script>
     window.loadVideo = async (id) => {
       const masterUrl = '/' + id + '/' + (id === 'a' ? 'master.m3u8' : 'playlist');
-      await fetch(masterUrl).then(r => r.text());
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest(); xhr.open("GET", masterUrl);
+        xhr.onload = resolve; xhr.onerror = reject; xhr.send();
+      });
       await fetch('/' + id + '/media').then(r => r.text());
       const source = new MediaSource();
       const video = document.querySelector('video');
@@ -51,7 +54,7 @@ async function main() {
     if (url.pathname.startsWith("/watch/")) {
       response.writeHead(200, { "Content-Type": "text/html" }).end(fixture);
     } else if (/\/(master\.m3u8|playlist)$/.test(url.pathname)) {
-      response.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" })
+      response.writeHead(200, { "Content-Type": url.pathname.endsWith("/playlist") ? "text/plain" : "application/vnd.apple.mpegurl" })
         .end("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=300000,RESOLUTION=320x180\nmedia\n");
     } else if (url.pathname.endsWith("/media")) {
       response.writeHead(200, { "Content-Type": "application/x-mpegURL; charset=utf-8" }).end(mediaPlaylist);
@@ -152,7 +155,7 @@ async function main() {
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, browser: browser.browser().version(),
       playableHls: true, blobOnly: true, popupOpen: true, refreshRecovery: true,
-      workerStoppedAndRestarted: true, sessionRestored: true, extensionlessMime: true,
+      workerStoppedAndRestarted: true, sessionRestored: true, extensionlessHlsTextBody: true, xhrObserved: true,
       spaAutomaticPopupRefresh: true, oldVideoExcluded: true, segmentPersistence: false
     }, null, 2));
   } finally {

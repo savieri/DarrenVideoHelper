@@ -13,7 +13,7 @@ const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const SESSION_ENRICH_RETRIES = 1;
 const RECENT_MAIN_MEDIA_WINDOW_MS = 90 * 1000;
 const DETECTION_STORAGE_PREFIX = "activeDetection:";
-const MAX_PERSISTED_MEDIA = 12;
+const MAX_PERSISTED_MEDIA = 24;
 const MAX_PENDING_MEDIA = 40;
 const PENDING_MEDIA_TTL_MS = 30 * 1000;
 const DEFAULT_SETTINGS = {
@@ -43,13 +43,13 @@ function withDetectionState(callback) {
 }
 
 function detectionSnapshot(state) {
-  const streams = sortedStreams(state)
+  const streams = Array.from(state.streams.values()).sort((a, b) => retentionScore(b) - retentionScore(a) || b.lastSeen - a.lastSeen)
     .filter((stream) => (isHlsKind(stream.kind) || stream.kind === "mp4")
       && !isHardExcludedUrl(stream.lastUrl || stream.url))
     .slice(0, MAX_PERSISTED_MEDIA)
     .map((stream) => ({ ...stream, headers: { ...stream.headers } }));
   return {
-    version: 1,
+    version: 2,
     savedAt: Date.now(),
     sessionId: state.sessionId,
     pageUrl: state.pageUrl,
@@ -57,6 +57,8 @@ function detectionSnapshot(state) {
     documentId: state.documentId,
     pageTitle: state.pageTitle,
     currentSrc: state.currentSrc,
+    mainPlaylistUrl: state.mainPlaylistUrl,
+    mainFrameId: state.mainFrameId,
     createdAt: state.createdAt,
     thumbnailUrl: state.thumbnailUrl,
     hasVideoElement: state.hasVideoElement,
@@ -117,7 +119,7 @@ async function restoreDetectionState() {
     if (tabState.has(tab.id)) continue;
     const saved = stored[`${DETECTION_STORAGE_PREFIX}${tab.id}`];
     const identity = pageVideoIdentity(tab.url);
-    const matches = saved?.version === 1 && saved.pageIdentity === identity
+    const matches = saved?.version === 2 && saved.pageIdentity === identity
       && (!documentId || !saved.documentId || documentId === saved.documentId);
     const state = createVideoSession(tab.id, {
       pageUrl: tab.url, pageTitle: tab.title, documentId,
@@ -128,7 +130,7 @@ async function restoreDetectionState() {
     if (matches) {
       for (const field of ["sessionId", "pageTitle", "currentSrc", "createdAt", "thumbnailUrl",
         "hasVideoElement", "videoDuration", "mainVideoHeight", "mainVideoWidth", "mainVideoObservedAt",
-        "resourceSince", "invalidated", "invalidatedAt", "pendingPageUrl", "pendingDocumentBoundary"]) {
+        "resourceSince", "mainPlaylistUrl", "mainFrameId", "invalidated", "invalidatedAt", "pendingPageUrl", "pendingDocumentBoundary"]) {
         if (saved[field] !== undefined) state[field] = saved[field];
       }
       state.documentId = documentId || saved.documentId || "";
@@ -298,6 +300,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 function handleRuntimeMessage(message, sender, sendResponse) {
+  if (message?.type === "observedPlaylist" && sender.tab?.id != null) {
+    withDetectionState(async () => {
+      const state = tabState.get(sender.tab.id);
+      const item = message.item;
+      if (!state || !item || typeof item.text !== "string" || item.text.length > 1024 * 1024) return;
+      // Frame document identity is authoritative; iframe URLs need not match the top URL.
+      const frame = await chrome.webNavigation.getFrame({ tabId: sender.tab.id, frameId: sender.frameId || 0 });
+      if (!frame || (sender.documentId && frame.documentId !== sender.documentId)) return;
+      if (state !== tabState.get(sender.tab.id) || state.invalidated || item.observedAt < state.resourceSince) return;
+      const info = parsePlaylistInfo(item.text, item.url);
+      if (info.isMaster === undefined || !/^https?:/i.test(item.url)) return;
+      recordPlaylist(state, item.url, info, { source: "page-response", frameId: sender.frameId || 0,
+        documentId: sender.documentId || "", documentUrl: sender.url || "", observedAt: item.observedAt, headers: { "user-agent": String(item.userAgent || "").slice(0,1000) } });
+      detectionLog(state, "playlist-response", { url: item.url, frameId: sender.frameId || 0,
+        master: info.isMaster, live: info.live, segments: info.segmentUrls?.length || 0 });
+      await persistDetectionState(state.tabId);
+    }).catch(() => {});
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (message?.type === "getDiagnostics") {
+    getPopupState(message.tabId).then(p => {
+      const state = tabState.get(p.tabId);
+      sendResponse({ ok: true, diagnostics: {
+        version: chrome.runtime.getManifest().version_name, generatedAt: new Date().toISOString(),
+        pageUrl: diagnosticUrl(state?.pageUrl), documentId: state?.documentId,
+        sessionId: state?.sessionId, currentSrc: state?.currentSrc, resourceSince: state?.resourceSince,
+        mainFrameId: state?.mainFrameId, duration: state?.videoDuration, invalidated: state?.invalidated,
+        selectedUrl: diagnosticUrl(p.recommended?.resourceUrl), candidates: [...(state?.streams.values() || [])]
+          .filter(s => s.kind !== "segment").map(s => ({ url: diagnosticUrl(s.lastUrl), kind: s.kind,
+            association: s.association, frameId: s.frameId, firstSeen: s.firstSeen, lastSeen: s.lastSeen })),
+        requestContext: (() => {
+          const headers = state?.streams.get(p.recommended?.resourceId)?.headers || {};
+          return { userAgent: headers["user-agent"] || "", origin: diagnosticUrl(headers.origin),
+            referer: diagnosticUrl(headers.referer), hasCookie: Boolean(headers.cookie) };
+        })(), frames: state?.diagnosticFrames || [], events: state?.diagnostics || []
+      } });
+    }).catch(e => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
   if (!message || typeof message !== "object") return false;
 
   if (message.type === "getStreams") {
@@ -470,11 +512,14 @@ async function getPopupState(tabId, retryCount = 0) {
     return { ok: false, stale: true, error: "页面视频已切换，请刷新后再下载。" };
   }
 
+  enrichedStreams = enrichedStreams.map(stream => state.segmentOwners.has(stream.resourceUrl)
+    ? { ...stream, kind: "segment", canDownloadWholeVideo: false, isRecommendable: false } : stream);
   enrichedStreams = linkPlaylistCandidates(enrichedStreams);
   const ranked = rankStreams(makePopupStreams(sessionSnapshot, enrichedStreams), sessionSnapshot);
   const streams = aggregateLogicalVideos(sessionSnapshot, ranked, settings)
     .map((stream, index) => ({ ...stream, recommended: index === 0, rank: index + 1 }));
   const recommended = streams[0] || null;
+  detectionLog(state, "popup-selection", { url: recommended?.resourceUrl || "", candidateCount: state.streams.size, mainFrameId: state.mainFrameId });
 
   const hasPageExtractor = Boolean(makePageExtractorCandidate(sessionSnapshot));
   const hasDetectedVideo = hasPageExtractor || allSessionStreams.some((stream) => stream.kind !== "segment");
@@ -539,7 +584,7 @@ async function collectMediaHints(tab, state) {
 
   try {
     const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
+      target: { tabId: tab.id, allFrames: true },
       world: "MAIN",
       args: [state.resourceSince || 0, Array.from(state.pendingStreams.values())
         .filter((candidate) => pendingCandidateBelongsToSession(candidate, state, state, true))
@@ -566,7 +611,15 @@ async function collectMediaHints(tab, state) {
             height: video.videoHeight || video.clientHeight || 0,
             duration: Number.isFinite(video.duration) ? video.duration : 0,
             currentTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
-            paused: video.paused
+            paused: video.paused,
+            playerSources: (() => {
+              // Only recover an Hls instance actually bound to this video element.
+              const instances = [window.hls, window.player?.hls, window.player?.engine?.hls];
+              return instances.filter(h => h?.media === video && /^https?:/i.test(h.url || ""))
+                .map(h => ({ url: h.url, variants: (h.levels || []).map(l => ({
+                  quality: l.height || 0, urls: Array.isArray(l.url) ? l.url : [l.url]
+                })) }));
+            })()
           };
         });
         // Resource timing keeps the original playlist even when MSE exposes only blob:.
@@ -677,35 +730,38 @@ async function collectMediaHints(tab, state) {
           }
         })();
         return {
+          userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "",
           title: metaTitle,
           pageUrl: location.href,
           poster: absolute(videos.find((item) => item.poster)?.poster || metaImage),
           metadataVideoId,
           siteMedia,
           resources,
+          observedPlaylists: window.__darrenMediaObserver?.snapshot?.() || [],
+          resourceCount: performance.getEntriesByType("resource").length,
+          serviceWorkerUrl: typeof navigator !== "undefined" ? navigator.serviceWorker?.controller?.scriptURL || "" : "",
           videos
         };
       }
     });
 
-    const hints = results?.[0]?.result;
+    const topResult = results?.find(r => r.frameId === 0) || results?.[0];
+    const hints = topResult?.result;
     if (!hints) return state;
-    // Discard a scan that completed in a document/session we have already left.
     const current = tabState.get(tab.id);
     if (current !== state || current.invalidated || !samePageIdentity(hints.pageUrl, current.pageUrl)
-      || (results[0].documentId && current.documentId && results[0].documentId !== current.documentId)) {
+      || (topResult.documentId && current.documentId && topResult.documentId !== current.documentId)) {
       return current || state;
     }
-
-    const videos = hints.videos || [];
-    const playableVideos = videos.filter((video) => video.duration || video.height || video.width || video.currentSrc);
-    const mainVideo = playableVideos.sort((a, b) => {
-      const activeDiff = Number(!a.paused) - Number(!b.paused);
-      if (activeDiff) return -activeDiff;
-      const areaDiff = (b.width * b.height) - (a.width * a.height);
-      if (areaDiff) return areaDiff;
-      return (b.duration || 0) - (a.duration || 0);
-    })[0];
+    const frames = results.filter(r => r.result).map(r => ({ ...r.result,
+      frameId: r.frameId || 0, documentId: r.documentId || "" }));
+    state.diagnosticFrames = frames.map(f => ({ frameId: f.frameId, documentId: f.documentId,
+      url: diagnosticUrl(f.pageUrl), videos: f.videos?.length || 0, resourceCount: f.resourceCount,
+      observedPlaylists: f.observedPlaylists?.length || 0, serviceWorkerUrl: diagnosticUrl(f.serviceWorkerUrl) }));
+    const videos = frames.flatMap(f => (f.videos || []).map(v => ({ ...v,
+      frameId: f.frameId, documentId: f.documentId, frameUrl: f.pageUrl })));
+    const mainVideo = videos.filter(v => v.duration || v.height || v.width || v.currentSrc)
+      .sort(compareMainVideos)[0];
     const extractor = pageExtractorInfo(hints.pageUrl);
     const metadataMatchesPage = !extractor?.videoId
       || !hints.metadataVideoId
@@ -713,34 +769,75 @@ async function collectMediaHints(tab, state) {
     state = updateVideoContext(tab.id, {
       pageUrl: hints.pageUrl,
       pageIdentity: pageVideoIdentity(hints.pageUrl),
-      documentId: results[0].documentId || state.documentId,
+      documentId: topResult.documentId || state.documentId,
       videoId: extractor?.videoId || "",
       metadataVideoId: hints.metadataVideoId || "",
       metadataMatchesPage,
       pageTitle: metadataMatchesPage ? hints.title : "",
-      poster: metadataMatchesPage ? hints.poster : "",
+      poster: metadataMatchesPage ? (mainVideo?.poster || hints.poster) : "",
       hasVideoElement: Boolean(videos.length),
       mainVideo: metadataMatchesPage ? mainVideo : null,
       reason: "popup-hints"
     });
     if (hints.siteMedia) state = updateSiteMediaContext(tab.id, hints.siteMedia);
 
-    for (const resource of hints.resources || []) {
-      if (resource.observedAt < state.resourceSince || state.previousMediaUrls.has(resource.url)) continue;
-      if ((!isStreamUrl(resource.url) && !resource.forcedKind) || isHardExcludedUrl(resource.url)) continue;
-      upsertStream(tab.id, resource.url, {
-        source: "performance-recovery",
-        forcedKind: resource.forcedKind,
-        association: "session-performance",
-        documentUrl: hints.pageUrl,
-        documentId: results[0].documentId || state.documentId,
-        initiator: safeUrl(hints.pageUrl)?.origin || "",
-        headers: state.headersByUrl.get(headerKey(resource.url)) || { referer: hints.pageUrl },
-        observedAt: resource.observedAt
-      });
-      state.pendingStreams.delete(resource.url);
+    const mainPlaylist = mainVideo?.playerSources?.[0];
+    if (mainPlaylist && state.mainPlaylistUrl && state.mainPlaylistUrl !== mainPlaylist.url
+      && !state.previousMediaUrls.has(mainPlaylist.url)) {
+      const freshInfo = new Map([...state.playlistInfo].filter(([url]) => url === mainPlaylist.url
+        || mainPlaylist.variants.some(v => v.urls.includes(url))));
+      state = rotateVideoSession(tab.id, { pageUrl: state.pageUrl, documentId: state.documentId,
+        pageTitle: state.pageTitle, currentSrc: mainVideo.currentSrc,
+        reason: "player-playlist-change", forceSessionBoundary: true });
+      state.playlistInfo = freshInfo;
+      state.videoDuration = mainVideo.duration || 0;
+      state.mainVideoHeight = mainVideo.height || 0;
+      detectionLog(state, "player-playlist-change", { url: mainPlaylist.url });
+      broadcastSessionState("videoSessionChanged", state);
     }
+    if (mainPlaylist && !state.previousMediaUrls.has(mainPlaylist.url)) state.mainPlaylistUrl = mainPlaylist.url;
 
+    state.mainFrameId = mainVideo?.frameId || 0;
+    for (const frame of frames) {
+      for (const item of frame.observedPlaylists || []) {
+        if (item.observedAt < state.resourceSince || state.previousMediaUrls.has(item.url)) continue;
+        recordPlaylist(state, item.url, parsePlaylistInfo(item.text, item.url), {
+          frameId: frame.frameId, documentId: frame.documentId,
+          documentUrl: frame.pageUrl, observedAt: item.observedAt, source: "page-response",
+          headers: { "user-agent": frame.userAgent || "" }
+        });
+      }
+      for (const resource of frame.resources || []) {
+        if (resource.observedAt < state.resourceSince || state.previousMediaUrls.has(resource.url)) continue;
+        if ((!isStreamUrl(resource.url) && !resource.forcedKind) || isHardExcludedUrl(resource.url)) continue;
+        upsertStream(tab.id, resource.url, {
+          source: "performance-recovery", forcedKind: resource.forcedKind,
+          association: "session-performance", frameId: frame.frameId,
+          documentUrl: frame.pageUrl, documentId: frame.documentId,
+          initiator: safeUrl(frame.pageUrl)?.origin || "",
+          headers: state.headersByUrl.get(headerKey(resource.url)) || { referer: frame.pageUrl },
+          observedAt: resource.observedAt
+        });
+        state.pendingStreams.delete(resource.url);
+      }
+    }
+    for (const source of mainVideo?.playerSources || []) {
+      if (state.previousMediaUrls.has(source.url)) continue;
+      const details = { forcedKind: "hls_master", source: "player-hls", association: "main-player",
+        frameId: mainVideo.frameId, documentId: mainVideo.documentId, documentUrl: mainVideo.frameUrl,
+        duration: mainVideo.duration, headers: { ...(state.headersByUrl.get(headerKey(source.url)) || {}),
+          referer: mainVideo.frameUrl || state.pageUrl,
+          origin: safeUrl(mainVideo.frameUrl || state.pageUrl)?.origin || "",
+          "user-agent": frames.find(f => f.frameId === mainVideo.frameId)?.userAgent || hints.userAgent || "" } };
+      upsertStream(tab.id, source.url, details);
+      const master = state.streams.get(streamKey(source.url));
+      master.variantUrls = source.variants.flatMap(v => v.urls).filter(Boolean);
+      master.availableQualities = source.variants.map(v => v.quality).filter(Boolean);
+      master.quality = Math.max(0, ...master.availableQualities);
+      for (const variant of source.variants) for (const url of variant.urls.filter(Boolean)) {
+        upsertStream(tab.id, url, { ...details, forcedKind: "hls_media", quality: variant.quality });
+      }
+    }
     for (const video of videos) {
       const urls = [video.currentSrc, ...(video.sourceUrls || [])].filter(Boolean);
       for (const url of urls) {
@@ -748,6 +845,7 @@ async function collectMediaHints(tab, state) {
         upsertStream(tab.id, url, {
           source: video === mainVideo ? "dom-main-video" : "dom-secondary-video",
           association: video === mainVideo ? "main-current-src" : "secondary-dom",
+          frameId: video.frameId, documentId: video.documentId, documentUrl: video.frameUrl,
           quality: video.height || undefined,
           duration: video.duration || undefined
         });
@@ -759,15 +857,23 @@ async function collectMediaHints(tab, state) {
   return tabState.get(tab.id) || state;
 }
 
+function compareMainVideos(a, b) {
+  // A large paused feature remains the main video beside small autoplay widgets.
+  const area = v => (v.width || 0) * (v.height || 0);
+  const substantial = v => v.duration > 120 && area(v) >= 320 * 180;
+  return Number(substantial(b)) - Number(substantial(a)) || area(b) - area(a)
+    || Number(!b.paused) - Number(!a.paused) || (b.duration || 0) - (a.duration || 0);
+}
+
 async function enrichStreamForPopup(session, stream) {
   const url = stream.lastUrl || stream.url;
-  const playlistInfo = isHlsKind(stream.kind) ? await fetchPlaylistInfo(url) : {};
-  const contentLength = stream.kind === "mp4" ? await fetchContentLength(url) : 0;
+  const playlistInfo = isHlsKind(stream.kind) ? await fetchPlaylistInfo(url, stream, session) : {};
+  const contentLength = stream.kind === "mp4" ? await fetchContentLength(url, stream, session) : 0;
   const kind = playlistInfo.isMaster === true ? "hls_master"
     : playlistInfo.isMaster === false && isHlsKind(stream.kind) ? "hls_media"
       : stream.kind;
   const mainCurrentSrc = normalizeResourceUrl(session.currentSrc);
-  const stronglyAssociated = stream.association === "main-current-src"
+  const stronglyAssociated = ["main-current-src", "main-player"].includes(stream.association)
     || (mainCurrentSrc && normalizeResourceUrl(url) === mainCurrentSrc);
   const quality = stream.quality || playlistInfo.quality || (stronglyAssociated ? session.mainVideoHeight : 0) || 0;
   const duration = stream.duration || playlistInfo.duration || (stronglyAssociated ? session.videoDuration : 0) || 0;
@@ -805,50 +911,76 @@ async function enrichStreamForPopup(session, stream) {
     association: stream.association || "session-network",
     initiator: stream.initiator || "",
     documentUrl: stream.documentUrl || "",
-    variantUrls: playlistInfo.variantUrls || [],
+    frameId: stream.frameId,
+    live: playlistInfo.live,
+    playlistVerified: playlistInfo.isMaster !== undefined,
+    variantUrls: playlistInfo.variantUrls || stream.variantUrls || [],
+    availableQualities: stream.availableQualities || playlistInfo.availableQualities || [],
     stronglyAssociated,
     capturedAfterMain,
-    canDownloadWholeVideo: !["segment", "page", "dash_video", "dash_audio"].includes(kind),
+    canDownloadWholeVideo: !playlistInfo.segmentUrls?.includes(url) && !["segment", "page", "dash_video", "dash_audio"].includes(kind),
     isRecommendable: !["segment", "page", "dash_video", "dash_audio"].includes(kind)
   };
 }
 
-async function fetchContentLength(url) {
-  if (!/^https?:\/\//i.test(url)) return 0;
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2500);
-    const response = await fetch(url, {
-      method: "HEAD",
-      credentials: "include",
-      cache: "no-store",
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    const value = Number(response.headers.get("content-length") || 0);
-    return Number.isFinite(value) ? value : 0;
-  } catch {
-    return 0;
+function probeHeaders(stream = {}, session = {}) {
+  const headers = {};
+  for (const name of ["authorization", "accept", "origin", "referer"]) {
+    if (stream.headers?.[name]) headers[name] = stream.headers[name];
   }
+  if (!headers.referer) headers.referer = stream.documentUrl || session.pageUrl || "";
+  return headers;
 }
 
-async function fetchPlaylistInfo(url) {
-  if (!/^https?:\/\//i.test(url)) return {};
+async function fetchContentLength(url, stream = {}, session = {}) {
+  if (!/^https?:/i.test(url)) return 0;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3000);
-    const response = await fetch(url, {
-      credentials: "include",
-      cache: "no-store",
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    if (!response.ok) return {};
+    // Range GET follows the actual playback method; HEAD often has different routing.
+    const response = await fetch(url, { method: "GET", credentials: "include", cache: "no-store",
+      headers: { ...probeHeaders(stream, session), range: "bytes=0-0" }, signal: controller.signal });
+    const total = Number(response.headers.get("content-range")?.match(/\/(\d+)$/)?.[1]
+      || (response.status === 206 ? 0 : response.headers.get("content-length")) || 0);
+    await response.body?.cancel?.();
+    return response.ok && Number.isFinite(total) ? total : 0;
+  } catch { return 0; } finally { clearTimeout(timer); }
+}
+
+async function fetchPlaylistInfo(url, stream = {}, session = {}) {
+  if (!/^https?:/i.test(url)) return {};
+  const state = tabState.get(session.tabId);
+  const cached = state?.playlistInfo.get(url);
+  if (cached && (cached.observedOnPage || Date.now() - cached.checkedAt < 15000)) return cached;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
+  try {
+    const response = await fetch(url, { credentials: "include", cache: "no-store",
+      headers: probeHeaders(stream, session), signal: controller.signal });
+    if (!response.ok) { detectionLog(state, "probe-failed", { url, status: response.status }); return cached || {}; }
     const text = await response.text();
-    return parsePlaylistInfo(text, url);
-  } catch {
-    return {};
+    const info = parsePlaylistInfo(text, response.url || url);
+    if (info.isMaster === undefined) { detectionLog(state, "probe-not-playlist", { url, status: response.status }); return cached || {}; }
+    if (state && state.sessionId === session.sessionId) recordPlaylist(state, url, info);
+    return info;
+  } catch (error) { detectionLog(state, "probe-error", { url, error: error.message }); return cached || {}; }
+  finally { clearTimeout(timer); }
+}
+
+function recordPlaylist(state, url, info, details = {}) {
+  if (!state || state.invalidated || info.isMaster === undefined) return;
+  state.playlistInfo.set(url, { ...info, checkedAt: Date.now(), observedOnPage: details.source === "page-response" });
+  while (state.playlistInfo.size > 40) state.playlistInfo.delete(state.playlistInfo.keys().next().value);
+  if (details.source) upsertStream(state.tabId, url, { ...details,
+    headers: { origin: safeUrl(details.documentUrl)?.origin || "", referer: details.documentUrl || state.pageUrl,
+      ...(state.headersByUrl.get(headerKey(url)) || {}), ...(details.headers || {}) },
+    forcedKind: info.isMaster ? "hls_master" : "hls_media" });
+  for (const segment of info.segmentUrls || []) {
+    state.segmentOwners.set(segment, url);
+    const existing = state.streams.get(streamKey(segment));
+    if (existing) { existing.kind = "segment"; existing.label = "HLS 分片"; }
   }
+  while (state.segmentOwners.size > 16000) state.segmentOwners.delete(state.segmentOwners.keys().next().value);
 }
 
 function parsePlaylistInfo(text, playlistUrl = "") {
@@ -869,6 +1001,16 @@ function parsePlaylistInfo(text, playlistUrl = "") {
       }
     }
     info.variantUrls = Array.from(new Set(variants));
+    info.availableQualities = Array.from(new Set(Array.from(text.matchAll(/RESOLUTION=\d+x(\d+)/gi)).map(m => Number(m[1]))));
+  }
+  if (!info.isMaster) {
+    info.live = !/#EXT-X-ENDLIST/i.test(text);
+    info.segmentUrls = String(text).split(/\r?\n/).flatMap(line => {
+      const value = line.trim();
+      const uri = value.startsWith("#EXT-X-MAP:") ? value.match(/URI="([^"]+)"/)?.[1]
+        : value && !value.startsWith("#") ? value : "";
+      try { return uri ? [new URL(uri, playlistUrl).href] : []; } catch { return []; }
+    });
   }
   const resolutionMatches = Array.from(text.matchAll(/RESOLUTION=(\d+)x(\d+)/gi));
   if (resolutionMatches.length) {
@@ -1467,6 +1609,7 @@ function snapshotVideoSession(state) {
     pageIdentity: state.pageIdentity,
     videoId: state.videoId,
     currentSrc: state.currentSrc,
+    mainFrameId: state.mainFrameId,
     createdAt: state.createdAt,
     fingerprint: state.fingerprint,
     thumbnailUrl: state.thumbnailUrl,
@@ -1816,7 +1959,9 @@ function aggregateLogicalVideos(state, rankedStreams, settings = {}) {
   if (!primary) return [];
 
   const qualityValues = Array.from(new Set(
-    rankedStreams
+    rankedStreams.filter(stream => ["page_extractor", "bilibili_dash"].includes(primary.kind)
+      || !(primary.stronglyAssociated || primary.masterStronglyAssociated) || stream.stronglyAssociated
+      || stream.parentMasterId === primary.resourceId || stream.resourceId === primary.parentMasterId)
       .flatMap((stream) => [Number(stream.quality || 0), ...(stream.availableQualities || []).map(Number)])
       .filter((quality) => quality > 0)
   )).sort((left, right) => right - left);
@@ -1875,7 +2020,7 @@ function aggregateLogicalVideos(state, rankedStreams, settings = {}) {
       : (primary.qualityLabel || (state.mainVideoHeight ? `${state.mainVideoHeight}p` : "最佳")),
     qualityOptions,
     defaultQuality,
-    evidenceCount: rankedStreams.length,
+    evidenceCount: rankedStreams.filter(s => s.kind !== "segment").length,
     advancedSources,
     ...previewSource,
     canDownloadWholeVideo: true,
@@ -1906,8 +2051,10 @@ function candidateScore(stream, state) {
   if (stream.kind === "hls_media") score += stream.parentMasterId ? 95000 : 85000;
   if (stream.kind === "segment") score -= 100000;
   if (stream.kind === "dash_video" || stream.kind === "dash_audio") score -= 120000;
-  if (stream.stronglyAssociated) score += 22000;
-  if (stream.masterStronglyAssociated) score += 16000;
+  if (stream.stronglyAssociated) score += 180000;
+  if (stream.live && state.videoDuration > 120 && !stream.stronglyAssociated) score -= 180000;
+  if (stream.frameId !== undefined && stream.frameId !== state.mainFrameId && !stream.stronglyAssociated) score -= 70000;
+  if (stream.masterStronglyAssociated) score += 180000;
   if (stream.capturedAfterMain) score += 5000;
   if (sameDocumentContext(stream.documentUrl, state.pageUrl)) score += 7000;
   if (sameOriginContext(stream.initiator, state.pageUrl)) score += 3500;
@@ -1949,11 +2096,16 @@ function createVideoSession(tabId, context = {}) {
     videoId: context.videoId || extractor?.videoId || "",
     documentId: context.documentId || "",
     currentSrc,
+    mainPlaylistUrl: "",
     createdAt,
     endedAt: 0,
     endReason: "",
     fingerprint: videoFingerprint(pageUrl, currentSrc),
     streams: new Map(),
+    playlistInfo: new Map(),
+    segmentOwners: new Map(),
+    diagnostics: [],
+    mainFrameId: 0,
     headersByUrl: new Map(),
     thumbnailUrl: "",
     hasVideoElement: false,
@@ -2304,6 +2456,12 @@ function captureNetworkStream(tabId, url, details = {}) {
   const state = tabState.get(tabId) || ensureVideoSession(tabId, {
     pageUrl: details.frameId === 0 ? details.documentUrl : ""
   });
+  const owner = state.segmentOwners.get(url);
+  if (owner) {
+    const playlist = state.streams.get(streamKey(owner));
+    if (playlist) playlist.lastSeen = details.observedAt || Date.now();
+    return;
+  }
   const remembered = state.headersByUrl.get(headerKey(url));
   const pendingHeaders = state.pendingStreams.get(url)?.details.headers;
   details = { ...details, headers: details.headers || pendingHeaders || remembered };
@@ -2313,7 +2471,12 @@ function captureNetworkStream(tabId, url, details = {}) {
   }
   if (details.frameId === 0 && state.documentId && details.documentId
     && state.documentId !== details.documentId) return;
-  if (state.previousMediaUrls.has(url)) return;
+  if (state.previousMediaUrls.has(url)) {
+    // A fresh request in the current document may legitimately reuse a signed URL.
+    if (details.observedAt < state.resourceSince || (state.documentId && details.documentId
+      && details.frameId === 0 && details.documentId !== state.documentId)) return;
+    state.previousMediaUrls.delete(url);
+  }
   const requestPage = details.documentUrl || fullMediaReferer(details.headers);
   if (
     state.pageUrl
@@ -2372,9 +2535,9 @@ function pendingCandidateBelongsToSession(candidate, state, previous, timingReco
   const isMainFrame = details.frameId === 0;
   if (isMainFrame && state.documentId && details.documentId && state.documentId !== details.documentId) return false;
   if (!isMainFrame && state.documentId && details.parentDocumentId && state.documentId !== details.parentDocumentId) return false;
-  if (details.documentUrl && !sameDocumentContext(state.pageUrl, details.documentUrl)) return false;
+  if (isMainFrame && details.documentUrl && !sameDocumentContext(state.pageUrl, details.documentUrl)) return false;
   const fullReferer = fullMediaReferer(details.headers);
-  if (fullReferer && !sameDocumentContext(state.pageUrl, fullReferer)) return false;
+  if (isMainFrame && fullReferer && !sameDocumentContext(state.pageUrl, fullReferer)) return false;
   if (state.previousMediaUrls.has(candidate.url)) return false;
   const newDocument = state.documentId && state.documentId !== previous?.documentId;
   if (newDocument && ((isMainFrame && details.documentId === state.documentId)
@@ -2391,7 +2554,7 @@ function upsertStream(tabId, url, details = {}) {
   if (state.invalidated || isHardExcludedUrl(url)) return;
   const id = streamKey(url);
   const now = Number(details.observedAt || Date.now());
-  const metadata = inferStreamMetadata(url, details.quality, details.forcedKind);
+  const metadata = inferStreamMetadata(url, details.quality, state.segmentOwners.has(url) ? "segment" : details.forcedKind);
   const existing = state.streams.get(id);
   const headers = details.headers || state.headersByUrl.get(headerKey(url)) || existing?.headers || {};
 
@@ -2399,14 +2562,15 @@ function upsertStream(tabId, url, details = {}) {
     existing.lastUrl = url;
     existing.headers = headers;
     existing.lastSeen = Math.max(existing.lastSeen, now);
-    if (details.forcedKind && !isYouTubePlaybackUrl(url) && existing.kind !== "segment") existing.kind = metadata.kind;
+    if (details.forcedKind && !isYouTubePlaybackUrl(url) && existing.kind !== "segment"
+      && !(existing.kind === "hls_master" && details.forcedKind === "hls")) existing.kind = metadata.kind;
     existing.sampleCount = (existing.sampleCount || 1) + 1;
     existing.documentUrl = details.documentUrl || existing.documentUrl || "";
     existing.initiator = details.initiator || existing.initiator || "";
     existing.documentId = details.documentId || existing.documentId || "";
     existing.frameId = details.frameId ?? existing.frameId;
     existing.parentDocumentId = details.parentDocumentId || existing.parentDocumentId || "";
-    if (details.association === "main-current-src" || !existing.association) {
+    if (["main-current-src", "main-player"].includes(details.association) || !existing.association) {
       existing.association = details.association || existing.association || "session-network";
     }
     if (details.source === "dom-main-video") {
@@ -2454,11 +2618,36 @@ function upsertStream(tabId, url, details = {}) {
 
   while (state.streams.size > MAX_STREAMS_PER_TAB) {
     const oldest = Array.from(state.streams.values()).sort((a, b) =>
-      Number(a.kind !== "segment") - Number(b.kind !== "segment") || a.lastSeen - b.lastSeen)[0];
+      retentionScore(a) - retentionScore(b) || a.lastSeen - b.lastSeen)[0];
     if (!oldest) break;
     state.streams.delete(oldest.id);
   }
   if (isHlsKind(metadata.kind) || metadata.kind === "mp4") persistDetectionState(tabId);
+}
+
+function retentionScore(stream) {
+  if (["main-player", "main-current-src"].includes(stream.association)) return 10;
+  if (isHlsKind(stream.kind)) return 5;
+  if (stream.kind === "segment") return 0;
+  return 1;
+}
+
+function diagnosticUrl(value) {
+  const url = safeUrl(value || "");
+  if (!url) return "";
+  // Export only the current tab, with query secrets and userinfo removed.
+  url.username = ""; url.password = ""; url.hash = "";
+  for (const key of [...url.searchParams.keys()]) url.searchParams.set(key, "[redacted]");
+  return url.href;
+}
+
+function detectionLog(state, event, details = {}) {
+  if (!state) return;
+  const entry = { at: new Date().toISOString(), event, ...details };
+  if (entry.url) entry.url = diagnosticUrl(entry.url);
+  state.diagnostics.push(entry);
+  state.diagnostics = state.diagnostics.slice(-120);
+  console.debug("[DarrenDetection]", entry);
 }
 
 function sortedStreams(state) {
@@ -2526,7 +2715,8 @@ function inferStreamMetadata(url, explicitQuality, forcedKind) {
   let kind = "unknown";
   if (isYouTubePlaybackUrl(url)) {
     kind = youtubeDashKind(url);
-  } else if (/\.(m4s|ts)(?:$|[?#])/i.test(url)
+  } else if (forcedKind === "segment" || /\.(m4s|ts)(?:$|[?#])/i.test(url)
+    || /(?:[_/-]init[_-]|[_/-](?:seg|fragment|chunk)[_-]\d+|_\d+_[A-Za-z0-9_-]+_\d{10}\.mp4$)/i.test(pathname)
     || /\/(?:init|initialization)(?:[-_.][a-z0-9_-]+)?\.mp4$/i.test(pathname)) {
     kind = "segment";
   } else if (["hls", "hls_master", "hls_media", "mp4"].includes(forcedKind)) {

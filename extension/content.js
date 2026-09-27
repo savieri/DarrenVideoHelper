@@ -78,13 +78,10 @@
     return Array.from(document.querySelectorAll("video"))
       .filter((video) => video.currentSrc || video.src || video.duration || video.videoWidth || video.clientWidth)
       .sort((left, right) => {
-        const playingDiff = Number(!right.paused) - Number(!left.paused);
-        if (playingDiff) return playingDiff;
-        const leftArea = (left.videoWidth || left.clientWidth || 0) * (left.videoHeight || left.clientHeight || 0);
-        const rightArea = (right.videoWidth || right.clientWidth || 0) * (right.videoHeight || right.clientHeight || 0);
-        const areaDiff = rightArea - leftArea;
-        if (areaDiff) return areaDiff;
-        return (right.duration || 0) - (left.duration || 0);
+        const area = v => (v.videoWidth || v.clientWidth || 0) * (v.videoHeight || v.clientHeight || 0);
+        const substantial = v => Number.isFinite(v.duration) && v.duration > 120 && area(v) >= 320 * 180;
+        return Number(substantial(right)) - Number(substantial(left)) || area(right) - area(left)
+          || Number(!right.paused) - Number(!left.paused) || (right.duration || 0) - (left.duration || 0);
       })[0] || null;
   }
 
@@ -94,9 +91,9 @@
   }
 
   function send(message) {
-    chrome.runtime.sendMessage(message, () => {
-      void chrome.runtime.lastError;
-    });
+    try {
+      chrome.runtime.sendMessage(message, () => { void chrome.runtime.lastError; });
+    } catch { /* The page can retain an old content world after extension reload. */ }
   }
 
   function sendPreviewEvent(message) {
