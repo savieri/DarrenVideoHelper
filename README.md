@@ -213,3 +213,5 @@ Downloads are marked `Done` only when:
 - file size and duration are valid
 
 The native host performs these checks even when yt-dlp exits nonzero. It accepts only the exact MP4 target assigned to that job attempt, never a fuzzy directory match. A verified MP4 is reported as `Completed` and is never deleted or overwritten by a trailing progress event, SSL EOF, timeout, 403, post-processing warning, disconnect, or late native error. Page-duration metadata is retained as diagnostics only because it can be stale or describe an ad/player state. If the exact MP4 does not pass ffprobe, the job reports `Failed`; invalid partial MP4 files and image/sidecar outputs from the current job are cleaned up.
+
+# Test 1
