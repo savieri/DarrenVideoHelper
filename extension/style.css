@@ -341,15 +341,15 @@ h2 {
   border-radius: 12px;
 }
 
-.job.complete {
+.job.completed {
   border-color: rgba(32, 168, 90, 0.55);
 }
 
-.job.error {
+.job.failed {
   border-color: rgba(186, 37, 37, 0.5);
 }
 
-.job.canceled {
+.job.cancelled {
   opacity: 0.72;
 }
 
@@ -357,11 +357,11 @@ h2 {
   color: var(--blue);
 }
 
-.job.complete .job-top strong {
+.job.completed .job-top strong {
   color: var(--green);
 }
 
-.job.error .job-top strong {
+.job.failed .job-top strong {
   color: var(--error);
 }
 
@@ -389,12 +389,12 @@ h2 {
   transition: width 180ms ease;
 }
 
-.job.complete .progress div {
+.job.completed .progress div {
   width: 100% !important;
   background: linear-gradient(90deg, var(--green), var(--blue));
 }
 
-.job.error .progress div {
+.job.failed .progress div {
   background: var(--error);
 }
 

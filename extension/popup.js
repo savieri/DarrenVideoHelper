@@ -64,7 +64,7 @@ async function loadStreams() {
     } else if (!currentState.streams?.length) {
       showNotice("没检测到视频，请先播放 3-5 秒后刷新 popup。", "warning");
     } else if (!currentState.detectedStreamCount) {
-      showNotice("未捕获到 m3u8/MP4，已优先使用当前页面 URL。", "warning");
+      showNotice("未捕获到 m3u8/MP4；PAGE 不会作为真实媒体自动下载。", "warning");
     } else {
       hideNotice();
     }
@@ -75,7 +75,7 @@ async function loadStreams() {
 
 function renderStreams(streams) {
   streamsEl.innerHTML = "";
-  downloadRecommendedButton.disabled = streams.length === 0;
+  downloadRecommendedButton.disabled = !currentState?.recommended;
 
   if (!streams.length) {
     const empty = document.createElement("div");
@@ -165,11 +165,10 @@ async function downloadStream(stream, button) {
   button.disabled = true;
   button.textContent = "Queued";
   try {
-    const response = await sendMessage({
-      type: "download",
-      tabId: currentTabId,
-      streamId: stream.id
-    });
+    let response = await requestDownload("download", stream, false);
+    if (response.duplicate && window.confirm(`${response.error}\n\n是否强制重新下载？`)) {
+      response = await requestDownload("download", stream, true);
+    }
     if (!response.ok) throw new Error(response.error || "Download failed to start.");
     await refreshJobs();
   } catch (error) {
@@ -183,7 +182,12 @@ async function downloadRecommended() {
   downloadRecommendedButton.disabled = true;
   downloadRecommendedButton.textContent = "Queued";
   try {
-    const response = await sendMessage({ type: "downloadRecommended", tabId: currentTabId });
+    const stream = currentState?.recommended;
+    if (!stream) throw new Error("当前没有可推荐的真实媒体资源。");
+    let response = await requestDownload("downloadRecommended", stream, false);
+    if (response.duplicate && window.confirm(`${response.error}\n\n是否强制重新下载？`)) {
+      response = await requestDownload("downloadRecommended", stream, true);
+    }
     if (!response.ok) throw new Error(response.error || "Download failed to start.");
     await refreshJobs();
   } catch (error) {
@@ -192,6 +196,21 @@ async function downloadRecommended() {
     downloadRecommendedButton.disabled = false;
     downloadRecommendedButton.textContent = "下载推荐";
   }
+}
+
+function requestDownload(type, stream, forceRedownload) {
+  return sendMessage({
+    type,
+    tabId: currentTabId,
+    forceRedownload,
+    selection: {
+      sessionId: stream.sessionId,
+      resourceId: stream.resourceId || stream.id,
+      resourceUrl: stream.resourceUrl || stream.lastUrl || stream.url,
+      pageUrl: stream.pageUrl || currentState?.pageUrl || "",
+      fingerprint: stream.fingerprint
+    }
+  });
 }
 
 async function importUrlFile(event) {
@@ -263,7 +282,7 @@ function renderJobs() {
 
     const controls = document.createElement("div");
     controls.className = "job-controls";
-    if (job.status === "queued" || job.status === "paused" || job.status === "running") {
+    if (["queued", "paused", "downloading", "merging", "refreshing"].includes(job.status)) {
       const cancel = document.createElement("button");
       cancel.type = "button";
       cancel.className = "small";
@@ -271,7 +290,7 @@ function renderJobs() {
       cancel.addEventListener("click", () => sendMessage({ type: "cancelJob", jobId: job.id }));
       controls.appendChild(cancel);
     }
-    if (job.status === "error" && (job.details || job.logs?.length)) {
+    if (job.status === "failed" && (job.details || job.logs?.length)) {
       const details = document.createElement("details");
       const summary = document.createElement("summary");
       summary.textContent = "错误详情";
@@ -303,11 +322,13 @@ function makeBadge(text, variant) {
 }
 
 function jobStatus(job) {
-  if (job.status === "complete") return "Done";
-  if (job.status === "error") return "Failed";
+  if (job.status === "completed") return "Done";
+  if (job.status === "failed") return "Failed";
   if (job.status === "queued") return "Queued";
   if (job.status === "paused") return "Paused";
-  if (job.status === "canceled") return "Canceled";
+  if (job.status === "cancelled") return "Canceled";
+  if (job.status === "refreshing") return "Refreshing link";
+  if (job.status === "merging") return "Merging";
   if (job.percent) return `${job.percent}%`;
   return "Running";
 }

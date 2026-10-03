@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-HOST_VERSION = "1.0.0"
+HOST_VERSION = "1.1.2"
 DEFAULT_OUTPUT_DIR = Path.home() / "Downloads" / "video_downloads"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
 SIDE_EXTENSIONS = IMAGE_EXTENSIONS | {
@@ -74,11 +74,12 @@ def send_message(payload):
         raise NativePipeClosed(str(error))
 
 
-def progress(job_id, message, percent=None, speed="", eta="", line=""):
+def progress(job_id, message, percent=None, speed="", eta="", line="", stage="downloading"):
     payload = {
         "type": "progress",
         "jobId": job_id,
         "message": message,
+        "stage": stage,
     }
     if percent is not None:
         payload["percent"] = percent
@@ -107,6 +108,7 @@ def complete(job_id, output_path, probe):
 def fail(job_id, message, reason="", details=""):
     send_message({
         "type": "error",
+        "code": "URL_EXPIRED" if is_expired_failure(details or reason or message) else "DOWNLOAD_FAILED",
         "jobId": job_id,
         "message": message,
         "error": reason or message,
@@ -171,7 +173,16 @@ def build_ytdlp_command(message, target_url, output_dir, output_name):
     command = [
         ytdlp,
         "--newline",
-        "--no-part",
+        "--no-continue",
+        "--abort-on-unavailable-fragments",
+        "--retries",
+        "5",
+        "--fragment-retries",
+        "8",
+        "--retry-sleep",
+        "fragment:exp=1:10",
+        "--socket-timeout",
+        "20",
         "--no-write-thumbnail",
         "--no-write-info-json",
         "--no-write-playlist-metafiles",
@@ -186,7 +197,7 @@ def build_ytdlp_command(message, target_url, output_dir, output_name):
         "--remux-video",
         "mp4",
         "--referer",
-        page_url or url,
+        headers.get("referer") or message.get("referer") or page_url or url,
         "-f",
         quality_selector(selected_quality),
         "-P",
@@ -264,6 +275,10 @@ def cleanup_sidecars(output_dir, stems, since, keep_path=None):
 
 
 def ffprobe_info(path):
+    if not path.exists() or not path.is_file():
+        raise RuntimeError("输出文件不存在。")
+    if path.stat().st_size < 64 * 1024:
+        raise RuntimeError("输出文件过小，不能算下载成功。")
     ffprobe = tool_path("ffprobe")
     process = subprocess.run(
         [
@@ -296,6 +311,8 @@ def ffprobe_info(path):
     fmt = data.get("format") or {}
     duration = float(fmt.get("duration") or video.get("duration") or 0)
     size = int(fmt.get("size") or path.stat().st_size)
+    if duration <= 0.5:
+        raise RuntimeError("输出文件时长无效，不能算下载成功。")
     return {
         "fileSize": size,
         "duration": duration,
@@ -313,7 +330,7 @@ def remux_to_mp4(job_id, input_path):
     if output_path.exists():
         output_path = input_path.with_name(f"{input_path.stem}.{int(time.time())}.mp4")
 
-    progress(job_id, "正在用 ffmpeg 转封装为 MP4...")
+    progress(job_id, "正在用 ffmpeg 转封装为 MP4...", stage="merging")
     command = [
         ffmpeg,
         "-hide_banner",
@@ -341,7 +358,7 @@ def remux_to_mp4(job_id, input_path):
     return output_path
 
 
-def validate_final_output(job_id, output_path):
+def validate_final_output(job_id, output_path, expected_duration=0):
     suffix = output_path.suffix.lower()
     if suffix in IMAGE_EXTENSIONS:
         try:
@@ -355,13 +372,27 @@ def validate_final_output(job_id, output_path):
         raise RuntimeError("下载结果不是 MP4，已判定失败。")
 
     try:
-        return output_path, ffprobe_info(output_path)
+        probe = ffprobe_info(output_path)
+        expected = float(expected_duration or 0)
+        actual = float(probe.get("duration") or 0)
+        if expected >= 10 and (actual < expected * 0.4 or actual > expected * 1.6):
+            raise RuntimeError(
+                f"输出时长与当前视频明显不符（预期约 {expected:.1f}s，实际 {actual:.1f}s）。"
+            )
+        return output_path, probe
     except Exception as error:
         try:
             output_path.unlink()
         except OSError:
             pass
         raise RuntimeError(f"输出文件未通过 ffprobe 视频校验：{error}")
+
+
+def is_expired_failure(output):
+    return bool(re.search(
+        r"\b(?:401|403)\b|forbidden|unauthorized|(?:url|link|token|signature|request)[^\n]{0,60}expir|expiredtoken|requestexpired",
+        output or "", re.IGNORECASE,
+    ))
 
 
 def classify_failure(output, fallback="下载失败。"):
@@ -383,8 +414,8 @@ def classify_failure(output, fallback="下载失败。"):
         return "yt-dlp、ffmpeg 或 ffprobe 缺失。请重新安装 Darren Video Helper。"
     if "could not copy chrome cookie" in text or "failed to decrypt" in text or "cookie database" in text:
         return "cookies 读取失败。请退出 Chrome 后重试，或确认 yt-dlp 有权限读取 Chrome cookies。"
-    if "403" in text or "forbidden" in text or "http error 403" in text:
-        return "403/链接过期。请刷新页面、播放视频 3-5 秒后重试。"
+    if is_expired_failure(output):
+        return "媒体授权或链接已失效，自动更新链接后重试。"
     if "drm" in text or "widevine" in text or "license" in text or "encrypted" in text:
         return "DRM/加密流无法下载。"
     if "cookie" in text and ("expired" in text or "login" in text or "authentication" in text):
@@ -436,7 +467,21 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
             sys.stderr.write(line)
             sys.stderr.flush()
 
+            if is_expired_failure(line):
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                return None, "".join(output_lines), started_at
+
             percent, speed, eta = parse_progress_line(line)
+            stage = "merging" if re.search(
+                r"\[(?:Merger|FixupM3u8|VideoRemuxer)\]|merging formats|remuxing video",
+                line,
+                re.IGNORECASE,
+            ) else "downloading"
             now = time.time()
             if percent and now - last_progress_sent >= 0.5:
                 last_progress_sent = now
@@ -447,10 +492,16 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
                     speed=speed,
                     eta=eta,
                     line=line,
+                    stage=stage,
                 )
             elif now - last_progress_sent >= 1.8:
                 last_progress_sent = now
-                progress(job_id, line.strip()[:240] or "yt-dlp 正在处理...", line=line)
+                progress(
+                    job_id,
+                    line.strip()[:240] or "yt-dlp 正在处理...",
+                    line=line,
+                    stage=stage,
+                )
 
         return_code = process.wait()
     except NativePipeClosed:
@@ -463,7 +514,6 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
         raise
 
     combined_output = "".join(output_lines)
-    cleanup_sidecars(output_dir, [stem], started_at)
     if return_code != 0:
         return None, combined_output, started_at
 
@@ -479,6 +529,48 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
         return None, combined_output + "\nDownload finished, but no MP4 video output was found.", started_at
 
     return output_path, combined_output, started_at
+
+
+def is_retryable_failure(output):
+    text = (output or "").lower()
+    return any(marker in text for marker in (
+        "timed out",
+        "timeout",
+        "connection reset",
+        "remote end closed",
+        "temporary failure",
+        "http error 429",
+        "http error 500",
+        "http error 502",
+        "http error 503",
+        "http error 504",
+        "unable to download video data",
+        "fragment",
+    ))
+
+
+def run_ytdlp_with_retries(job_id, message, target_url, output_dir, stem, label, attempts=2):
+    combined = []
+    earliest_started_at = time.time()
+    for attempt in range(1, max(1, attempts) + 1):
+        attempt_label = label if attempts == 1 else f"{label}（尝试 {attempt}/{attempts}）"
+        output_path, output, started_at = run_ytdlp_attempt(
+            job_id,
+            message,
+            target_url,
+            output_dir,
+            stem,
+            attempt_label,
+        )
+        earliest_started_at = min(earliest_started_at, started_at)
+        combined.append(output)
+        if output_path:
+            return output_path, "\n".join(combined), earliest_started_at
+        if is_expired_failure(output) or attempt >= attempts or not is_retryable_failure(output):
+            break
+        progress(job_id, f"网络或 HLS 分片暂时失败，准备重试 {attempt + 1}/{attempts}...")
+        time.sleep(min(2, attempt))
+    return None, "\n".join(combined), earliest_started_at
 
 
 def run_download(message):
@@ -507,7 +599,7 @@ def run_download(message):
     first_output = ""
     first_started_at = time.time()
     first_target = page_url if (prefer_page or kind == "segment") and page_url else stream_url
-    output_path, first_output, first_started_at = run_ytdlp_attempt(
+    output_path, first_output, first_started_at = run_ytdlp_with_retries(
         job_id,
         message,
         first_target,
@@ -517,11 +609,12 @@ def run_download(message):
     )
 
     used_stems = [stem]
-    if not output_path and page_url and page_url != first_target:
+    allow_page_fallback = message.get("allowPageFallback") is True
+    if not output_path and allow_page_fallback and page_url and page_url != first_target:
         progress(job_id, "视频流 URL 失败，回退使用当前页面 URL...")
         fallback_stem = f"{stem} page"
         used_stems.append(fallback_stem)
-        output_path, second_output, second_started_at = run_ytdlp_attempt(
+        output_path, second_output, second_started_at = run_ytdlp_with_retries(
             job_id,
             message,
             page_url,
@@ -541,7 +634,11 @@ def run_download(message):
         cleanup_sidecars(output_dir, used_stems, first_started_at)
         raise RuntimeError(classify_failure(first_output) + "\n\n" + first_output[-8000:])
 
-    output_path, probe = validate_final_output(job_id, output_path)
+    output_path, probe = validate_final_output(
+        job_id,
+        output_path,
+        expected_duration=message.get("expectedDuration") or 0,
+    )
     cleanup_sidecars(output_dir, used_stems, first_started_at, keep_path=output_path)
     complete(job_id, output_path, probe)
 
