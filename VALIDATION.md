@@ -1,5 +1,21 @@
 # Release validation
 
+## Beta.3 detection fix — 2026-09-13
+
+| Check | Result | Scope |
+| --- | --- | --- |
+| JavaScript tests | PASS (46/46) | Original 29 plus 17 detection/navigation regressions: preloaded blob HLS, active popup refresh, worker-state/header restoration, MIME master/media parsing, navigation candidate ownership/TTL/bounds, segment floods, stale events/scans, SPA recovery including extensionless MIME candidates with origin-only referrers and timing proof across restart, startup ordering, closed tabs, aborted navigation, and initialization fragments |
+| Native-host/release tests | PASS (20/20) | Existing tests; Native Host implementation is unchanged |
+| Real MV3 Chrome + playable HLS/MSE | PASS | Chrome for Testing 151.0.7922.34, isolated profile, actual extension and popup script; preloaded HLS with blob-only currentSrc, refresh recovery, real worker stop/restart with a lost global probe and restored sessionId, extensionless HLS MIME capture/master parsing, automatic popup update to B after history.pushState, old A resources excluded, no stored segments |
+| Popup layout/preview | PASS | 390px widths, no overflow, real muted MP4 hover playback and teardown |
+| Page-player preview | PASS | Four JPEG frames; existing page playback continues after preview stop |
+| Framed Native Host smoke | PASS | Direct MP4 and HLS both complete with video and audio; invalid URL returns error. Direct: 2.000s / 165,688 bytes. HLS: 2.043s / 166,232 bytes |
+| Requested MISSAV page | NOT VERIFIED | `https://missav.ws/ch/mikr-122` returned HTTP 404 in the isolated Chrome run, with zero video elements or HLS timing entries. No live playback acceptance is claimed for that URL |
+
+Run the fixture using `test/detection_browser_smoke.js`; see `test/DETECTION.md`. The browser test opens popup.html as an extension tab and supplies the originating video tabId to the unchanged popup loader; it exercises the actual refresh button and session broadcasts. The toolbar button itself and current production MISSAV playback are outside this automated fixture.
+
+An extension update/reload clears Chrome session storage. Existing suffixed playlists can still be recovered from the current document's resource timing; extensionless MIME candidates need an observed response or a surviving session snapshot. If a page has explicitly cleared/evicted its resource timing history before the extension ever observed a playlist, the original URL cannot be reconstructed from a blob alone.
+
 ## Automated checks recorded on 2026-08-17
 
 | Area | Result | Scope |

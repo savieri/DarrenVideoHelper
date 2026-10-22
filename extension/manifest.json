@@ -25,7 +25,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://*.youtube.com/*", "*://youtu.be/*", "*://*.bilibili.com/*"],
+      "matches": ["<all_urls>"],
       "js": ["page-navigation.js"],
       "run_at": "document_start",
       "all_frames": false,

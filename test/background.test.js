@@ -14,8 +14,10 @@ function event() {
   };
 }
 
-function loadBackground() {
+function loadBackground(options = {}) {
   const storage = { downloadHistory: [] };
+  const sessionStorage = options.sessionStorage || {};
+  const tabs = options.tabs || [{ id: 1, url: "https://site.test/a", title: "A" }];
   const chrome = {
     commands: { onCommand: event() },
     runtime: {
@@ -30,6 +32,11 @@ function loadBackground() {
     },
     scripting: { executeScript: async () => [] },
     storage: {
+      session: {
+        async get() { await options.sessionGet?.(); return structuredClone(sessionStorage); },
+        async set(values) { Object.assign(sessionStorage, structuredClone(values)); },
+        async remove(keys) { for (const key of [keys].flat()) delete sessionStorage[key]; }
+      },
       local: {
         async get(defaults) { return { ...defaults, ...storage }; },
         async set(values) { Object.assign(storage, values); }
@@ -42,17 +49,21 @@ function loadBackground() {
     tabs: {
       onRemoved: event(),
       onUpdated: event(),
-      async get(tabId) { return { id: tabId, url: "https://site.test/a", title: "A" }; },
-      async query() { return [{ id: 1, url: "https://site.test/a", title: "A" }]; }
+      async get(tabId) { return tabs.find((tab) => tab.id === tabId) || { id: tabId, url: "https://site.test/a", title: "A" }; },
+      async query() { return tabs; }
     },
     webNavigation: {
+      onBeforeNavigate: event(),
+      onErrorOccurred: event(),
+      async getFrame({ tabId }) { return { documentId: tabs.find((tab) => tab.id === tabId)?.documentId || "" }; },
       onCommitted: event(),
       onHistoryStateUpdated: event(),
       onReferenceFragmentUpdated: event()
     },
     webRequest: {
       onBeforeRequest: event(),
-      onBeforeSendHeaders: event()
+      onBeforeSendHeaders: event(),
+      onHeadersReceived: event()
     }
   };
   const context = vm.createContext({
@@ -71,12 +82,334 @@ function loadBackground() {
   });
   const source = fs.readFileSync(path.join(__dirname, "../extension/background.js"), "utf8");
   vm.runInContext(source, context, { filename: "background.js" });
-  return { context, storage };
+  return { context, storage, sessionStorage, chrome, tabs };
 }
 
 function evaluate(context, expression) {
   return vm.runInContext(expression, context);
 }
+
+function installMediaPage(harness, { resources = [], pageUrl = harness.tabs[0].url, currentSrc = `blob:${pageUrl}/player` } = {}) {
+  const video = {
+    currentSrc, videoWidth: 1920, videoHeight: 1080, duration: 600, currentTime: 10,
+    paused: false, querySelectorAll: () => []
+  };
+  harness.context.location = { href: pageUrl };
+  harness.context.window = {};
+  harness.context.document = {
+    title: "HLS main video", querySelector: () => null,
+    querySelectorAll: (selector) => selector === "video" ? [video] : []
+  };
+  harness.context.performance = { timeOrigin: Date.now() - 3600000, getEntriesByType: () => resources };
+  harness.chrome.scripting.executeScript = async ({ func, args }) => [{
+    documentId: harness.tabs[0].documentId,
+    result: func(...args)
+  }];
+  harness.context.fetch = async (url) => ({
+    ok: true, headers: { get: () => null },
+    text: async () => /master|playlist/.test(url)
+      ? "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080\n720.m3u8\n"
+      : "#EXTM3U\n#EXTINF:600,\npart.ts\n#EXT-X-ENDLIST"
+  });
+  return { video, resources };
+}
+
+test("popup open and refresh actively recover preloaded HLS with only a blob video source", async () => {
+  const harness = loadBackground({ tabs: [{ id: 1, url: "https://missav.ws/ch/mikr-122", documentId: "doc-a" }] });
+  const entries = [
+    { name: "https://cdn.test/main/master.m3u8", startTime: 1000 },
+    ...Array.from({ length: 160 }, (_, index) => ({ name: `https://cdn.test/main/part-${index}.ts`, startTime: 10000 + index })),
+    { name: "https://cdn.test/ads/master.m3u8", startTime: 2000 },
+    { name: "https://analytics.test/video.mp4", startTime: 3000 },
+    { name: "https://cdn.test/thumb.mp4", startTime: 4000 },
+    { name: "https://cdn.test/poster.png", startTime: 5000 }
+  ];
+  installMediaPage(harness, { resources: entries });
+  let scans = 0;
+  const execute = harness.chrome.scripting.executeScript;
+  harness.chrome.scripting.executeScript = async (request) => { scans++; return execute(request); };
+  const request = () => new Promise((resolve) => harness.chrome.runtime.onMessage.listener({ type: "getStreams", tabId: 1 }, {}, resolve));
+  const opened = await request();
+  assert.equal(opened.recommended.resourceUrl, "https://cdn.test/main/master.m3u8");
+  assert.equal(opened.streams.length, 1);
+  assert.equal(opened.recommended.pipelineLabel, "HLS → MP4");
+  assert.equal(evaluate(harness.context, "Array.from(tabState.get(1).streams.values()).some(s => /ads|analytics|thumb|png/.test(s.url))"), false);
+  // A refresh recovers even if no request has fired since the first open.
+  evaluate(harness.context, "tabState.get(1).streams.clear()");
+  const refreshed = await request();
+  assert.equal(refreshed.recommended.resourceUrl, opened.recommended.resourceUrl);
+  assert.equal(scans, 2);
+});
+
+test("worker restart restores playlist, headers and timestamps without DOM/resource hints", async () => {
+  const tabs = [{ id: 1, url: "https://missav.ws/ch/mikr-122", documentId: "doc-a" }];
+  const first = loadBackground({ tabs });
+  await evaluate(first.context, "detectionReady");
+  evaluate(first.context, `updateVideoContext(1, { pageUrl: "${tabs[0].url}", mainVideo: { currentSrc: "blob:https://missav.ws/player", duration: 600 } });
+    upsertStream(1, "https://cdn.test/playlist?token=one", { forcedKind: "hls", headers: { referer: "${tabs[0].url}", origin: "https://missav.ws", cookie: "test-only" } });
+    upsertStream(1, "https://cdn.test/main/one.ts", {});`);
+  await evaluate(first.context, "persistDetectionState(1)");
+  const saved = first.sessionStorage["activeDetection:1"];
+  assert.equal(saved.streams.length, 1);
+  assert.equal(saved.streams[0].kind, "hls_media");
+  const second = loadBackground({ tabs, sessionStorage: first.sessionStorage });
+  const popup = await evaluate(second.context, "getPopupState(1)");
+  assert.equal(popup.recommended.resourceUrl, saved.streams[0].url);
+  assert.equal(popup.sessionId, saved.sessionId);
+  const restored = evaluate(second.context, "Array.from(tabState.get(1).streams.values())[0]");
+  assert.equal(restored.headers.cookie, "test-only");
+  assert.equal(restored.headers.referer, tabs[0].url);
+  assert.equal(restored.lastSeen, saved.streams[0].lastSeen);
+  assert.equal(popup.streams.length, 1);
+});
+
+test("MIME identifies extensionless HLS/MP4, parses master/media and preserves DASH/segments", async () => {
+  const harness = loadBackground();
+  await evaluate(harness.context, "detectionReady");
+  installMediaPage(harness);
+  const emit = async (url, mime, overrides = {}) => harness.chrome.webRequest.onHeadersReceived.listener({
+    tabId: 1, url, statusCode: 200, frameId: 0, initiator: "https://site.test", documentUrl: "https://site.test/a",
+    responseHeaders: [{ name: "Content-Type", value: mime }], ...overrides
+  });
+  for (const [index, mime] of ["application/vnd.apple.mpegurl", "application/x-mpegURL; charset=UTF-8", "audio/mpegurl", "audio/x-mpegurl"].entries()) {
+    await emit(`https://cdn.test/playlist?id=${index}`, mime);
+  }
+  await emit("https://cdn.test/media?id=one", "application/vnd.apple.mpegurl");
+  await emit("https://cdn.test/file?id=one", "video/mp4");
+  await emit("https://cdn.test/main/part.m4s", "video/mp4");
+  await emit("https://r1.googlevideo.com/videoplayback?id=A&itag=137", "video/mp4");
+  await emit("https://cdn.test/ads/playlist", "application/vnd.apple.mpegurl");
+  await emit("https://cdn.test/analytics/file", "video/mp4");
+  await emit("https://cdn.test/error", "video/mp4", { statusCode: 403 });
+  await emit("https://cdn.test/html", "text/html");
+  const streams = evaluate(harness.context, "Array.from(tabState.get(1).streams.values()).map(snapshotStream)");
+  assert.equal(streams.length, 8);
+  const master = await evaluate(harness.context, "enrichStreamForPopup(snapshotVideoSession(tabState.get(1)), Array.from(tabState.get(1).streams.values())[0])");
+  assert.equal(master.kind, "hls_master");
+  assert.equal(master.variantUrls[0], "https://cdn.test/720.m3u8");
+  const media = await evaluate(harness.context, "enrichStreamForPopup(snapshotVideoSession(tabState.get(1)), Array.from(tabState.get(1).streams.values())[4])");
+  assert.equal(media.kind, "hls_media");
+  assert.equal(media.duration, 600);
+  assert.equal(streams[5].kind, "mp4");
+  assert.equal(streams[6].kind, "segment");
+  assert.equal(streams[7].kind, "dash_video");
+  assert.equal(evaluate(harness.context, 'parsePlaylistInfo("<html>not a playlist</html>").isMaster'), undefined);
+});
+
+test("MIME upgrades an unknown candidate and retains captured request headers", async () => {
+  const harness = loadBackground();
+  await evaluate(harness.context, "detectionReady");
+  evaluate(harness.context, 'upsertStream(1, "https://cdn.test/file", {})');
+  await harness.chrome.webRequest.onBeforeSendHeaders.listener({ tabId: 1, url: "https://cdn.test/file", requestHeaders: [{ name: "Referer", value: "https://site.test/a" }] });
+  await harness.chrome.webRequest.onHeadersReceived.listener({ tabId: 1, url: "https://cdn.test/file", frameId: 0, statusCode: 200, responseHeaders: [{ name: "content-type", value: "video/mp4" }] });
+  const stream = evaluate(harness.context, "Array.from(tabState.get(1).streams.values())[0]");
+  assert.equal(stream.kind, "mp4");
+  assert.equal(stream.headers.referer, "https://site.test/a");
+});
+
+test("navigation buffer merges the unique new playlist and rejects old document/origin candidates", () => {
+  const harness = loadBackground();
+  const result = evaluate(harness.context, `(() => {
+    commitVideoNavigation(2, { pageUrl: "https://missav.ws/ch/a", documentId: "old" });
+    invalidateVideoSession(2, { pageUrl: "https://missav.ws/ch/b", forceDocumentBoundary: true });
+    captureNetworkStream(2, "https://cdn.test/new/playlist", { forcedKind: "hls", frameId: 0, documentId: "new", initiator: "https://missav.ws", headers: { referer: "https://missav.ws/ch/b" } });
+    captureNetworkStream(2, "https://cdn.test/old/master.m3u8", { frameId: 0, documentId: "old", initiator: "https://missav.ws" });
+    captureNetworkStream(2, "https://cdn.test/wrong/master.m3u8", { frameId: 0, initiator: "https://other.test" });
+    captureNetworkStream(2, "https://cdn.test/stale/master.m3u8", { frameId: 0, documentId: "new", documentUrl: "https://missav.ws/ch/a" });
+    updateVideoContext(2, { pageUrl: "https://missav.ws/ch/b" });
+    const during = tabState.get(2).invalidated;
+    commitVideoNavigation(2, { pageUrl: "https://missav.ws/ch/b", reason: "tab-url" });
+    const stillPending = tabState.get(2).invalidated;
+    const state = commitVideoNavigation(2, { pageUrl: "https://missav.ws/ch/b", documentId: "new", forceDocumentBoundary: true });
+    return { during, stillPending, urls: Array.from(state.streams.values()).map(s => s.url), kind: Array.from(state.streams.values())[0].kind };
+  })()`);
+  assert.equal(result.during, true);
+  assert.equal(result.stillPending, true);
+  assert.deepEqual(Array.from(result.urls), ["https://cdn.test/new/playlist"]);
+  assert.equal(result.kind, "hls_media");
+});
+
+test("same-document SPA buffer requires the new page context rather than same-origin evidence", () => {
+  const harness = loadBackground();
+  const urls = evaluate(harness.context, `(() => {
+    commitVideoNavigation(2, { pageUrl: "https://missav.ws/ch/a", documentId: "spa" });
+    upsertStream(2, "https://cdn.test/a/master.m3u8");
+    invalidateVideoSession(2, { pageUrl: "https://missav.ws/ch/b" });
+    captureNetworkStream(2, "https://cdn.test/b/master.m3u8", { frameId: 0, documentId: "spa", headers: { referer: "https://missav.ws/ch/b" } });
+    captureNetworkStream(2, "https://cdn.test/a/retry.m3u8", { frameId: 0, documentId: "spa", headers: { referer: "https://missav.ws/ch/a" } });
+    captureNetworkStream(2, "https://cdn.test/ambiguous.m3u8", { frameId: 0, documentId: "spa", initiator: "https://missav.ws" });
+    const state = commitVideoNavigation(2, { pageUrl: "https://missav.ws/ch/b" });
+    return Array.from(state.streams.values()).map(s => s.url);
+  })()`);
+  assert.deepEqual(Array.from(urls), ["https://cdn.test/b/master.m3u8"]);
+  assert.equal(evaluate(harness.context, "tabState.get(2).documentId"), "spa");
+});
+
+test("buffer expires candidates, remains bounded and protects playlists against segment floods", () => {
+  const harness = loadBackground();
+  const result = evaluate(harness.context, `(() => {
+    commitVideoNavigation(2, { pageUrl: "https://site.test/a", documentId: "old" });
+    invalidateVideoSession(2, { pageUrl: "https://site.test/b" });
+    captureNetworkStream(2, "https://cdn.test/expired.m3u8", { frameId: 0, documentId: "new" });
+    tabState.get(2).pendingStreams.get("https://cdn.test/expired.m3u8").bufferedAt -= PENDING_MEDIA_TTL_MS + 1;
+    captureNetworkStream(2, "https://cdn.test/b/master.m3u8", { frameId: 0, documentId: "new" });
+    for (let n = 0; n < 140; n++) captureNetworkStream(2, "https://cdn.test/b/part-" + n + ".ts", { frameId: 0, documentId: "new" });
+    const size = tabState.get(2).pendingStreams.size;
+    const next = commitVideoNavigation(2, { pageUrl: "https://site.test/b", documentId: "new", forceDocumentBoundary: true });
+    for (let n = 0; n < 140; n++) upsertStream(2, "https://cdn.test/unique-" + n + ".ts");
+    return { size, expired: next.streams.has(streamKey("https://cdn.test/expired.m3u8")), master: next.streams.has(streamKey("https://cdn.test/b/master.m3u8")), streams: next.streams.size };
+  })()`);
+  assert.equal(result.size, 40);
+  assert.equal(result.expired, false);
+  assert.equal(result.master, true);
+  assert.equal(result.streams, 100);
+});
+
+test("site video switch recovers new HLS while old timing entries cannot refill the session", async () => {
+  const tabs = [{ id: 1, url: "https://missav.ws/ch/a", documentId: "spa" }];
+  const harness = loadBackground({ tabs });
+  const page = installMediaPage(harness, { resources: [{ name: "https://cdn.test/a/master.m3u8", startTime: 1000 }] });
+  const first = await evaluate(harness.context, "getPopupState(1)");
+  const boundary = Date.now() - 100;
+  evaluate(harness.context, `invalidateVideoSession(1, { pageUrl: "https://missav.ws/ch/b", observedAt: ${boundary} })`);
+  page.resources.push({ name: "https://cdn.test/b/master.m3u8", startTime: boundary + 50 - harness.context.performance.timeOrigin });
+  tabs[0].url = harness.context.location.href = "https://missav.ws/ch/b";
+  await harness.chrome.webNavigation.onHistoryStateUpdated.listener({ tabId: 1, frameId: 0, documentId: "spa", url: tabs[0].url });
+  const next = await evaluate(harness.context, "getPopupState(1)");
+  assert.notEqual(next.sessionId, first.sessionId);
+  assert.equal(next.recommended.resourceUrl, "https://cdn.test/b/master.m3u8");
+  assert.equal(evaluate(harness.context, 'Array.from(tabState.get(1).streams.values()).some(s => s.url.includes("/a/"))'), false);
+});
+
+test("extensionless SPA playlist with only an origin referrer is confirmed by post-boundary timing", async () => {
+  const harness = loadBackground({ tabs: [{ id: 1, url: "https://missav.ws/ch/a", documentId: "spa" }] });
+  const page = installMediaPage(harness);
+  await evaluate(harness.context, "detectionReady");
+  const boundary = Date.now() - 100;
+  evaluate(harness.context, `invalidateVideoSession(1, { pageUrl: "https://missav.ws/ch/b", observedAt: ${boundary} });
+    captureNetworkStream(1, "https://cdn.test/b/playlist?id=one", { forcedKind: "hls", frameId: 0, documentId: "spa", initiator: "https://missav.ws", headers: { referer: "https://missav.ws/" } });
+    captureNetworkStream(1, "https://cdn.test/stale/playlist", { forcedKind: "hls", frameId: 0, documentId: "old", initiator: "https://missav.ws" });
+    commitVideoNavigation(1, { pageUrl: "https://missav.ws/ch/b", documentId: "spa" });`);
+  harness.tabs[0].url = harness.context.location.href = "https://missav.ws/ch/b";
+  page.resources.push({ name: "https://cdn.test/b/playlist?id=one", startTime: boundary + 50 - harness.context.performance.timeOrigin });
+  assert.equal(evaluate(harness.context, "tabState.get(1).streams.size"), 0);
+  await evaluate(harness.context, "persistDetectionState(1)");
+  const restarted = loadBackground({ tabs: [{ id: 1, url: "https://missav.ws/ch/b", documentId: "spa" }], sessionStorage: structuredClone(harness.sessionStorage) });
+  const restartedPage = installMediaPage(restarted);
+  const withoutTiming = await evaluate(restarted.context, "getPopupState(1)");
+  assert.equal(withoutTiming.recommended, null);
+  restartedPage.resources.push({ name: "https://cdn.test/b/playlist?id=one", startTime: boundary + 50 - restarted.context.performance.timeOrigin });
+  const restoredWithTiming = await evaluate(restarted.context, "getPopupState(1)");
+  assert.equal(restoredWithTiming.recommended.resourceUrl, "https://cdn.test/b/playlist?id=one");
+  const popup = await evaluate(harness.context, "getPopupState(1)");
+  assert.equal(popup.recommended.resourceUrl, "https://cdn.test/b/playlist?id=one");
+  assert.equal(popup.recommended.pipelineLabel, "HLS → MP4");
+  assert.equal(evaluate(harness.context, "tabState.get(1).pendingStreams.size"), 0);
+});
+
+test("old network events cannot rotate the current document back to an earlier page", () => {
+  const harness = loadBackground();
+  const result = evaluate(harness.context, `(() => {
+    const state = commitVideoNavigation(2, { pageUrl: "https://site.test/b", documentId: "new" });
+    captureNetworkStream(2, "https://cdn.test/a/master.m3u8", { frameId: 0, documentId: "old", documentUrl: "https://site.test/a" });
+    return { same: state === tabState.get(2), url: state.pageUrl, streams: state.streams.size };
+  })()`);
+  assert.equal(result.same, true);
+  assert.equal(result.url, "https://site.test/b");
+  assert.equal(result.streams, 0);
+});
+
+test("restore validates page/document identity and deletes closed-tab state", async () => {
+  const harness = loadBackground();
+  await evaluate(harness.context, "detectionReady");
+  evaluate(harness.context, 'commitVideoNavigation(1, { pageUrl: "https://site.test/a", documentId: "old" }); upsertStream(1, "https://cdn.test/a.m3u8");');
+  await evaluate(harness.context, "persistDetectionState(1)");
+  for (const tab of [
+    { id: 1, url: "https://site.test/b", documentId: "old" },
+    { id: 1, url: "https://site.test/a", documentId: "new" }
+  ]) {
+    const saved = structuredClone(harness.sessionStorage);
+    saved["activeDetection:999"] = saved["activeDetection:1"];
+    const restarted = loadBackground({ tabs: [tab], sessionStorage: saved });
+    await evaluate(restarted.context, "detectionReady");
+    assert.equal(evaluate(restarted.context, "tabState.get(1).streams.size"), 0);
+    assert.equal(saved["activeDetection:999"], undefined);
+    await restarted.chrome.tabs.onRemoved.listener(1);
+    await evaluate(restarted.context, "detectionWrites.get(1)");
+    assert.equal(saved["activeDetection:1"], undefined);
+  }
+});
+
+test("events received during asynchronous startup are applied after restore in order", async () => {
+  const original = loadBackground();
+  await evaluate(original.context, "detectionReady");
+  evaluate(original.context, 'upsertStream(1, "https://cdn.test/a.m3u8")');
+  await evaluate(original.context, "persistDetectionState(1)");
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const restarted = loadBackground({ sessionStorage: original.sessionStorage, sessionGet: () => gate });
+  const navigation = restarted.chrome.webNavigation.onHistoryStateUpdated.listener({ tabId: 1, frameId: 0, url: "https://site.test/b" });
+  const capture = restarted.chrome.webRequest.onBeforeRequest.listener({ tabId: 1, frameId: 0, url: "https://cdn.test/b.m3u8", documentUrl: "https://site.test/b" });
+  release();
+  await Promise.all([navigation, capture]);
+  assert.equal(evaluate(restarted.context, "tabState.get(1).pageUrl"), "https://site.test/b");
+  assert.deepEqual(Array.from(evaluate(restarted.context, "Array.from(tabState.get(1).streams.values()).map(s => s.url)")), ["https://cdn.test/b.m3u8"]);
+  await evaluate(restarted.context, "persistDetectionState(1)");
+  assert.equal(original.sessionStorage["activeDetection:1"].pageIdentity, "https://site.test/b");
+});
+
+test("a scan completing after navigation cannot bring back the previous playlist", async () => {
+  const harness = loadBackground();
+  await evaluate(harness.context, "detectionReady");
+  let resolveScan;
+  harness.chrome.scripting.executeScript = () => new Promise((resolve) => { resolveScan = resolve; });
+  const scan = evaluate(harness.context, "collectMediaHints({ id: 1, url: 'https://site.test/a' }, tabState.get(1))");
+  evaluate(harness.context, 'commitVideoNavigation(1, { pageUrl: "https://site.test/b" })');
+  resolveScan([{ result: { pageUrl: "https://site.test/a", videos: [], resources: [{ url: "https://cdn.test/a/master.m3u8", observedAt: Date.now() }] } }]);
+  await scan;
+  assert.equal(evaluate(harness.context, "tabState.get(1).pageUrl"), "https://site.test/b");
+  assert.equal(evaluate(harness.context, "tabState.get(1).streams.size"), 0);
+});
+
+test("lightweight navigation candidates survive a worker restart without persisting segments", async () => {
+  const first = loadBackground({ tabs: [{ id: 1, url: "https://site.test/a", documentId: "old" }] });
+  await evaluate(first.context, "detectionReady");
+  evaluate(first.context, `invalidateVideoSession(1, { pageUrl: "https://site.test/b", forceDocumentBoundary: true });
+    captureNetworkStream(1, "https://cdn.test/b/playlist", { forcedKind: "hls", frameId: 0, documentId: "new", headers: { referer: "https://site.test/b" } });
+    captureNetworkStream(1, "https://cdn.test/b/one.ts", { frameId: 0, documentId: "new" });`);
+  await evaluate(first.context, "persistDetectionState(1)");
+  assert.equal(first.sessionStorage["activeDetection:1"].pendingMedia.length, 1);
+  const restarted = loadBackground({ tabs: [{ id: 1, url: "https://site.test/b", documentId: "new" }], sessionStorage: first.sessionStorage });
+  const popup = await evaluate(restarted.context, "getPopupState(1)");
+  assert.equal(popup.recommended.resourceUrl, "https://cdn.test/b/playlist");
+  assert.equal(popup.streams.length, 1);
+});
+
+test("aborted document navigation reactivates the original session", async () => {
+  const harness = loadBackground();
+  await evaluate(harness.context, "detectionReady");
+  evaluate(harness.context, 'upsertStream(1, "https://cdn.test/a/master.m3u8")');
+  const sessionId = evaluate(harness.context, "tabState.get(1).sessionId");
+  await harness.chrome.webNavigation.onBeforeNavigate.listener({ tabId: 1, frameId: 0, url: "https://site.test/b" });
+  await harness.chrome.webNavigation.onErrorOccurred.listener({ tabId: 1, frameId: 0, url: "https://site.test/b" });
+  assert.equal(evaluate(harness.context, "tabState.get(1).invalidated"), false);
+  assert.equal(evaluate(harness.context, "tabState.get(1).sessionId"), sessionId);
+  const popup = await evaluate(harness.context, "getPopupState(1)");
+  assert.equal(popup.recommended.resourceUrl, "https://cdn.test/a/master.m3u8");
+});
+
+test("HLS MP4 initialization fragments stay out of whole-video candidates and session storage", async () => {
+  const harness = loadBackground();
+  await evaluate(harness.context, "detectionReady");
+  for (const name of ["init.mp4", "init-stream0.mp4", "initialization.mp4"]) {
+    const kind = evaluate(harness.context, `inferStreamMetadata("https://cdn.test/${name}", 0, "mp4").kind`);
+    assert.equal(kind, "segment");
+    evaluate(harness.context, `upsertStream(1, "https://cdn.test/${name}", { forcedKind: "mp4" })`);
+  }
+  assert.equal(evaluate(harness.context, 'inferStreamMetadata("https://cdn.test/movie.mp4", 0, "mp4").kind'), "mp4");
+  await evaluate(harness.context, "persistDetectionState(1)");
+  assert.equal(harness.sessionStorage["activeDetection:1"].streams.length, 0);
+});
 
 test("navigation creates a new VideoSession and removes old candidates", () => {
   const { context } = loadBackground();
