@@ -18,7 +18,7 @@
       href,
       previousHref,
       at
-    }, location.origin === "null" ? "*" : location.origin);
+    }, /^https?:$/.test(new URL(location.href).protocol) ? location.origin : "*");
     lastHref = href;
   }
 
@@ -176,7 +176,7 @@
       source: PAGE_MEDIA_SOURCE,
       type: "bilibili-media",
       media
-    }, location.origin === "null" ? "*" : location.origin);
+    }, /^https?:$/.test(new URL(location.href).protocol) ? location.origin : "*");
   }
 
   function publishBilibiliGlobals(reason) {

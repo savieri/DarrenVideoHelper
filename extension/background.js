@@ -21,6 +21,13 @@ const MAX_PLAYLIST_BYTES = 4 * 1024 * 1024;
 const MAX_PLAYLIST_RECORDS = 180;
 const MAX_PENDING_MEDIA = 40;
 const PENDING_MEDIA_TTL_MS = 30 * 1000;
+// Conservative memory estimates leave space below Chrome's 10 MiB session quota.
+const SESSION_CACHE_BYTES = 1024 * 1024;
+const DETECTION_TAB_BYTES = 96 * 1024;
+const JOB_CREDENTIALS_KEY = "downloadJobCredentialsV9";
+let sessionCacheWrites = Promise.resolve();
+let sessionCacheWarning = false;
+let legacyJobsMigrated = false;
 const DEFAULT_SETTINGS = {
   outputDir: "~/Downloads/video_downloads",
   defaultQuality: "best",
@@ -42,6 +49,7 @@ let enqueueSerial = Promise.resolve();
 let queuePaused = false;
 let processingQueue = false;
 const detectionWrites = new Map();
+const detectionDirty = new Set();
 let detectionInitialized = false;
 const detectionReady = restoreDetectionState().catch(() => {}).then(() => {
   detectionInitialized = true;
@@ -58,32 +66,33 @@ function detectionSnapshot(state) {
       && !isHardExcludedUrl(stream.lastUrl || stream.url))
     .slice(0, MAX_PERSISTED_MEDIA)
     .map((stream) => ({ ...stream, headers: { ...stream.headers } }));
-  return {
+  const snapshot = {
     version: 2,
     savedAt: Date.now(),
     sessionId: state.sessionId,
     pageUrl: state.pageUrl,
     pageIdentity: state.pageIdentity,
     documentId: state.documentId,
-    pageTitle: state.pageTitle,
+    pageTitle: String(state.pageTitle || "").slice(0, 300),
     currentSrc: state.currentSrc,
     mainPlaylistUrl: state.mainPlaylistUrl,
     mainFrameId: state.mainFrameId,
     createdAt: state.createdAt,
-    thumbnailUrl: state.thumbnailUrl,
+    thumbnailUrl: /^https?:/i.test(state.thumbnailUrl || "") && state.thumbnailUrl.length < 4096 ? state.thumbnailUrl : "",
     hasVideoElement: state.hasVideoElement,
     videoDuration: state.videoDuration,
     mainVideoHeight: state.mainVideoHeight,
     mainVideoWidth: state.mainVideoWidth,
     mainVideoObservedAt: state.mainVideoObservedAt,
     resourceSince: state.resourceSince,
-    previousMediaUrls: Array.from(state.previousMediaUrls),
-    recentMedia: (state.recentMedia || []).slice(-80),
+    previousMediaUrls: Array.from(state.previousMediaUrls).slice(-100),
+    recentMedia: (state.recentMedia || []).slice(-20),
     activeMediaId: state.activeMediaId || "",
     activeMediaChangedAt: state.activeMediaChangedAt || 0,
     mediaCandidates: Array.from(state.mediaCandidates?.values?.() || [])
       .filter(candidate => Date.now() - candidate.lastSeenAt < 10 * 60 * 1000)
-      .slice(-40),
+      .sort((a,b) => Number(b.mediaId === state.activeMediaId) - Number(a.mediaId === state.activeMediaId))
+      .slice(0, 4),
     invalidated: state.invalidated,
     invalidatedAt: state.invalidatedAt,
     pendingPageUrl: state.pendingPageUrl,
@@ -97,21 +106,72 @@ function detectionSnapshot(state) {
         return (isHlsKind(kind) || isDirectVideoKind(kind)) && Date.now() - candidate.bufferedAt <= PENDING_MEDIA_TTL_MS;
       }).slice(0, MAX_PERSISTED_MEDIA)
   };
+  // These are disposable detection hints. Keep the selected player's identity,
+  // never truncate a resource URL into a different URL to make it fit.
+  for (const field of ["pendingMedia", "recentMedia", "streams", "mediaCandidates", "previousMediaUrls", "invalidatedMediaUrls"]) {
+    while (snapshot[field].length && storageBytes(snapshot) > DETECTION_TAB_BYTES) snapshot[field].pop();
+  }
+  return storageBytes(snapshot) <= DETECTION_TAB_BYTES ? snapshot : null;
 }
 
 function persistDetectionState(tabId) {
   if (!chrome.storage.session) return Promise.resolve();
-  const state = tabState.get(tabId);
-  const key = `${DETECTION_STORAGE_PREFIX}${tabId}`;
-  const snapshot = state?.pageUrl ? detectionSnapshot(state) : null;
-  // Serialize writes per tab so a late old-session write cannot undo a navigation.
-  const write = (detectionWrites.get(tabId) || Promise.resolve()).then(() =>
-    snapshot ? chrome.storage.session.set({ [key]: snapshot }) : chrome.storage.session.remove(key)
-  ).catch(() => {});
+  detectionDirty.add(tabId);
+  if (detectionWrites.has(tabId)) return detectionWrites.get(tabId);
+  // Coalesce bursts and read the current session when writing, not when queued.
+  const write = Promise.resolve().then(async () => {
+    while (detectionDirty.delete(tabId)) {
+      const state = tabState.get(tabId), key = `${DETECTION_STORAGE_PREFIX}${tabId}`;
+      const snapshot = state?.pageUrl ? detectionSnapshot(state) : null;
+      if (snapshot) await writeSessionCache({ [key]: snapshot });
+      else await chrome.storage.session.remove(key);
+    }
+  }).catch(() => {}).finally(() => detectionWrites.delete(tabId));
   detectionWrites.set(tabId, write);
-  void write.then(() => {
-    if (detectionWrites.get(tabId) === write) detectionWrites.delete(tabId);
-  });
+  return write;
+}
+
+function storageBytes(value) {
+  // Chrome measures session memory rather than JSON bytes. This is deliberately
+  // conservative; a real quota rejection is also handled below.
+  return JSON.stringify(value).length * 2 + 256;
+}
+
+function writeSessionCache(values) {
+  const write = sessionCacheWrites.catch(() => {}).then(async () => {
+    if (!chrome.storage.session) return false;
+    const stored = await chrome.storage.session.get(null);
+    const obsolete = legacyJobsMigrated ? Object.keys(stored).filter(key => key === "downloadJobsV6" || key === "downloadQueuePausedV6") : [];
+    if (obsolete.length) {
+      await chrome.storage.session.remove(obsolete);
+      for (const key of obsolete) delete stored[key];
+    }
+    const evictable = Object.keys(stored).filter(key => key.startsWith(DETECTION_STORAGE_PREFIX) && !(key in values))
+      .sort((a,b) => (stored[a]?.savedAt || 0) - (stored[b]?.savedAt || 0));
+    while (evictable.length && storageBytes({ ...stored, ...values }) > SESSION_CACHE_BYTES) {
+      const key = evictable.shift(); await chrome.storage.session.remove(key); delete stored[key];
+    }
+    try {
+      if (storageBytes({ ...stored, ...values }) > SESSION_CACHE_BYTES) {
+        await chrome.storage.session.remove(Object.keys(values)); return false;
+      }
+      await chrome.storage.session.set(values);
+      return true;
+    } catch (error) {
+      // Only disposable caches are evicted. Never clear jobs/local storage or
+      // unrelated extension settings to recover from a cache quota failure.
+      const keys = Object.keys(stored).filter(key => key.startsWith(DETECTION_STORAGE_PREFIX));
+      if (keys.length) await chrome.storage.session.remove(keys);
+      try { await chrome.storage.session.set(values); return true; }
+      catch {
+        await chrome.storage.session.remove(Object.keys(values));
+        if (!sessionCacheWarning) console.warn("VideoHelper session cache unavailable; durable jobs remain saved.");
+        sessionCacheWarning = true;
+        return false;
+      }
+    }
+  }).catch(() => false);
+  sessionCacheWrites = write;
   return write;
 }
 
@@ -183,12 +243,6 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.sync.get(DEFAULT_SETTINGS).then((stored) => {
     chrome.storage.sync.set({ ...DEFAULT_SETTINGS, ...stored });
   });
-});
-
-chrome.commands.onCommand.addListener((command) => {
-  if (command === "reload_extension") {
-    chrome.runtime.reload();
-  }
 });
 
 chrome.webRequest.onBeforeRequest.addListener(
@@ -1651,6 +1705,8 @@ const refreshRunners = new Set();
 const refreshTimers = new Map();
 const refreshDeadlineTimers = new Map();
 let jobWrites = Promise.resolve();
+let jobWritePending = false;
+let jobWriteDirty = false;
 let jobsInitialized = false;
 const jobsReady = detectionReady.then(restoreDownloadJobs).then(() => {
   jobsInitialized = true;
@@ -1664,37 +1720,71 @@ const jobsReady = detectionReady.then(restoreDownloadJobs).then(() => {
 });
 
 function persistDownloadJobs() {
-  const list = [...jobs.values()];
-  const retained = list.filter(job => !TERMINAL_JOB_STATUSES.has(job.status))
-    .concat(list.filter(job => TERMINAL_JOB_STATUSES.has(job.status)).slice(-30));
-  const snapshot = JSON.parse(JSON.stringify(retained));
-  const write = jobWrites.catch(() => {}).then(async () => {
-    await chrome.storage.session.set({ [JOB_STORAGE_KEY]: snapshot, downloadQueuePausedV6: queuePaused });
-    // Persist job history across browser restarts; request cookies remain session-only.
-    const durable = snapshot.map(job => {
-      const clean = structured => {
-        const copy = { ...structured };
+  jobWriteDirty = true;
+  if (jobWritePending) return jobWrites;
+  jobWritePending = true;
+  jobWrites = jobWrites.catch(() => {}).then(async () => {
+    while (jobWriteDirty) {
+      jobWriteDirty = false;
+      const list = [...jobs.values()];
+      const retained = list.filter(job => !TERMINAL_JOB_STATUSES.has(job.status))
+        .concat(list.filter(job => TERMINAL_JOB_STATUSES.has(job.status)).slice(-30));
+      const credentials = {};
+      const cleanPayload = (value, id, field) => {
+        if (!value) return value;
+        const copy = { ...value };
         for (const key of ["headers", "renditionMasterHeaders"]) if (copy[key]) {
           copy[key] = { ...copy[key] };
-          delete copy[key].cookie;
-          delete copy[key].authorization;
+          const secret = {};
+          for (const name of ["cookie", "authorization"]) {
+            if (copy[key][name]) secret[name] = copy[key][name];
+            delete copy[key][name];
+          }
+          if (Object.keys(secret).length && jobs.get(id)?.status !== "completed") {
+            credentials[id] ||= {}; credentials[id][field] ||= {}; credentials[id][field][key] = secret;
+          }
         }
         return copy;
       };
-      return { ...job, payload: clean(job.payload), originalPayload: clean(job.originalPayload) };
-    });
-    await chrome.storage.local.set({ downloadJobsV8: durable });
-  });
-  jobWrites = write;
-  return write;
+      const durable = retained.map(job => ({ ...job,
+        logs: (job.logs || []).slice(-12).map(line => String(line).slice(0, 400)),
+        flowLog: (job.flowLog || []).slice(-20).map(entry => ({ at: entry.at, event: String(entry.event || "").slice(0, 80) })),
+        details: String(job.details || "").slice(0, 2000),
+        payload: cleanPayload(job.payload, job.id, "payload"),
+        originalPayload: cleanPayload(job.originalPayload, job.id, "originalPayload")
+      }));
+      // Required state is saved first. A disposable session-cache failure must
+      // never prevent durable task state or trigger a second download dispatch.
+      await chrome.storage.local.set({ downloadJobsV8: durable, downloadQueuePausedV9: queuePaused });
+      legacyJobsMigrated = true;
+      // Credentials are the only job data cached in session. If they cannot fit,
+      // the task still exists; fresh authorization may be needed after restart.
+      for (const id of Object.keys(credentials).reverse()) {
+        if (storageBytes(credentials) <= 256 * 1024) break;
+        delete credentials[id];
+      }
+      await writeSessionCache({ [JOB_CREDENTIALS_KEY]: credentials });
+    }
+  }).finally(() => { jobWritePending = false; });
+  return jobWrites;
 }
 
 async function restoreDownloadJobs() {
-  const saved = await chrome.storage.session.get({ [JOB_STORAGE_KEY]: [], downloadQueuePausedV6: false });
-  queuePaused = saved.downloadQueuePausedV6 === true;
+  const saved = await chrome.storage.session.get({ [JOB_STORAGE_KEY]: [], [JOB_CREDENTIALS_KEY]: {}, downloadQueuePausedV6: false }).catch(() => ({}));
   const durable = await chrome.storage.local.get({ downloadJobsV8: [] });
+  queuePaused = (durable.downloadQueuePausedV9 ?? saved.downloadQueuePausedV6) === true;
   const merged = new Map((durable.downloadJobsV8 || []).map(job => [job.id, job]));
   for (const job of saved[JOB_STORAGE_KEY] || []) merged.set(job.id, job);
+  for (const [id, fields] of Object.entries(saved[JOB_CREDENTIALS_KEY] || {})) {
+    const job = merged.get(id);
+    if (!job) continue;
+    for (const field of ["payload", "originalPayload"]) {
+      if (!job[field]) continue;
+      for (const key of ["headers", "renditionMasterHeaders"]) {
+        if (fields[field]?.[key]) job[field][key] = { ...job[field][key], ...fields[field][key] };
+      }
+    }
+  }
   for (const job of merged.values()) if (job?.id && job.payload && !jobs.has(job.id)) jobs.set(job.id, job);
   for (const job of jobs.values()) {
     if (job.browserDownload) {
@@ -2436,6 +2526,9 @@ async function enqueueDownloadUnlocked(payload, settings, options = {}) {
     };
   }
   const jobId = makeId("job");
+  if ([...jobs.values()].filter(job => !TERMINAL_JOB_STATUSES.has(job.status)).length >= 100) {
+    return { ok: false, error: "任务队列已满，请先完成或取消部分任务。" };
+  }
   const job = {
     id: jobId,
     status: "queued",
@@ -2467,7 +2560,8 @@ async function enqueueDownloadUnlocked(payload, settings, options = {}) {
   };
   jobs.set(jobId, job);
   logJobFlow(job, "JOB_CREATED");
-  await persistDownloadJobs();
+  try { await persistDownloadJobs(); }
+  catch (error) { jobs.delete(jobId); throw error; }
   broadcastJob(job);
   if (!options.quiet) processQueue();
   return { ok: true, jobId };

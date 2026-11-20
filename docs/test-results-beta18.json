@@ -1,0 +1,72 @@
+{
+  "version": "1.2.1-beta.18",
+  "date": "2026-11-20",
+  "regressions": {
+    "javascript": 60,
+    "python": 53,
+    "total": 113,
+    "passed": 113,
+    "skipped": 0
+  },
+  "workerBoot": {
+    "manifestGatedApiSimulation": true,
+    "bothEditions": true,
+    "preFixFailureReproduced": true,
+    "liveChromeLoadVerified": false
+  },
+  "storageFaultInjection": [
+    "session quota rejection",
+    "local persistence rejection",
+    "legacy migration failure",
+    "multi-tab budget",
+    "coalesced writes",
+    "credentials separation",
+    "unrelated settings preserved"
+  ],
+  "nativeProtocol": {
+    "framedPings": 2,
+    "mp4": {
+      "completed": true,
+      "duration": 6.08,
+      "hasAudio": true
+    },
+    "webm": {
+      "completed": true,
+      "duration": 6.081,
+      "hasAudio": true
+    },
+    "hls": {
+      "completed": true,
+      "idempotentReplay": true,
+      "fragments": 6
+    },
+    "killedHostResume": {
+      "completed": true,
+      "verifiedFragmentsBeforeResume": 4,
+      "reusedNonsampledBytes": true
+    },
+    "parallelIsolation": true,
+    "duplicateDispatchBlocked": true,
+    "cancelPreservesVerifiedData": true,
+    "ok": true
+  },
+  "hlsEngineUnchangedFrom": "v1.2.1-beta.17",
+  "priorStressEvidence": "docs/test-results-beta17.json",
+  "notValidated": [
+    "live Chrome extension and Downloads API",
+    "Internet-download Gatekeeper approval",
+    "actual Chrome restart",
+    "original target CDN",
+    "fresh machine without dependencies",
+    "Intel Mac / Windows / Linux"
+  ],
+  "extractedMacOSInstaller": {
+    "passed": true,
+    "unicodeAndSpacedPaths": true,
+    "pinnedRuntimeProvisioned": true,
+    "installedSourceParity": true,
+    "manifestOriginAndPath": true,
+    "framedPings": 2,
+    "liveChromeRegistrationModified": false
+  }
+}

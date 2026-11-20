@@ -4,11 +4,11 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-function runBridge({ href, initial, playinfo }) {
+function runBridge({ href, initial, playinfo, targets = [], originOverride }) {
   const posted = [];
   const documentListeners = new Map();
   const windowListeners = new Map();
-  const location = { href, origin: new URL(href).origin };
+  const location = { href, origin: originOverride || new URL(href).origin };
   const sandbox = {
     URL,
     location,
@@ -30,8 +30,9 @@ function runBridge({ href, initial, playinfo }) {
     addEventListener(name, listener) {
       windowListeners.set(name, listener);
     },
-    postMessage(message) {
+    postMessage(message, target) {
       posted.push(message);
+      targets.push(target);
     }
   };
   sandbox.window = sandbox;
@@ -105,4 +106,12 @@ test("stale Bilibili globals are not labeled as the current BV", () => {
     }
   });
   assert.equal(posted.some((item) => item.type === "bilibili-media"), false);
+});
+
+test('navigation bridge uses wildcard only for opaque origins', () => {
+  const opaqueTargets=[],httpsTargets=[];
+  runBridge({href:'file:///tmp/generated-fixture.html',originOverride:'file://',targets:opaqueTargets});
+  runBridge({href:'https://example.test/watch',targets:httpsTargets});
+  assert.ok(opaqueTargets.length>0);assert.ok(opaqueTargets.every(target=>target==='*'));
+  assert.ok(httpsTargets.length>0);assert.ok(httpsTargets.every(target=>target==='https://example.test'));
 });

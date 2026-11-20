@@ -1,12 +1,21 @@
-# v1.2.1-beta.17 validation
+# v1.2.1-beta.18 validation
 
 Date: 2026-11-20. Apple Silicon macOS; Python 3.14; FFmpeg/ffprobe 9.0.2;
 project-local yt-dlp **2026.10.26**, installed from PyPI with a pinned SHA-256.
 This is a public prerelease, not a stable/universal-site claim.
 
+## Startup/storage hotfix evidence
+
+The reported beta.17 registration failure was reproduced before the fix: the actual
+Manifest exposes no commands API, but a stale listener accessed it. The old mock
+incorrectly supplied that API. Tests now use the real Manifest and include both
+editions. Added quota rejection, bounded multi-tab caches, coalesced writes, durable
+state before optional session credentials, safe legacy migration, unrelated-setting
+preservation, and opaque file-origin coverage. See [the beta.18 report](docs/REPAIR_REPORT_beta18.md).
+
 ## Automated regressions
 
-**100/100 passed: 47 JavaScript + 53 Python.** Run `bash scripts/test.sh` with Node.js,
+**113/113 passed: 60 JavaScript + 53 Python.** Run `bash scripts/test.sh` with Node.js,
 Python 3.11+, FFmpeg and ffprobe available. The HLS tests bind a loopback HTTP
 server and generate their own authorized test media.
 
@@ -44,14 +53,18 @@ pings; direct MP4 and WebM; HLS; completed-job idempotent replay; true host kill
 status query and resume; parallel isolated outputs; duplicate Job ID busy reply;
 cancellation with verified data preserved.
 
-The macOS installer ran in isolated registration/install directories with Chinese
+The beta.18 macOS installer ran in isolated registration/install directories with Chinese
 characters and spaces. It created its own pinned runtime, copied the actual source
 modules, passed self-tests, and registered the derived extension ID
 `mabnjnddplpelefjgohbjcoajnimpgna`. The user's live Chrome host registration was
-not modified by these tests. Release ZIP extraction/reference/source-parity checks
+not modified by these tests. Internet-download Gatekeeper approval was not automated;
+the installer remains unsigned and unnotarized. Release ZIP extraction/reference/source-parity checks
 and an extracted installer check are part of release verification.
 
 ## Long-transfer stress
+
+The HLS engine is byte-identical to beta.17. The following stress result was run
+for beta.17 and was not rerun for this storage/startup hotfix.
 
 `scripts/hls_stress.py`: **2482 segments / 7446.08 seconds / 2,362,476,808 input
 bytes**. Two temporary 503s at segment 828 recovered. Output: 116,399,789 bytes,
@@ -63,7 +76,7 @@ codec complexity. No user media is included in the repository or test results.
 
 ## Chrome UI
 
-Actual popup HTML/CSS/JS rendered in Chrome on a local HTTP fixture with clearly
+The beta.17 sample preview used actual popup HTML/CSS/JS rendered in Chrome on a local HTTP fixture with clearly
 labeled sample data: 390px body, 374px job cards, readable attention/verification
 labels, long-title truncation, resource sorting and refresh. Screenshot is
 `docs/images/popup.png`; it is not evidence of a live extension download.
@@ -72,7 +85,7 @@ labels, long-title truncation, resource sorting and refresh. Screenshot is
 
 - Original target CDN: its authorization/rate-limit root cause is still unknown;
   local simulated 403 recovery is not a claim that this website is fixed.
-- Live beta.17 loading through chrome://extensions, a real browser Downloads API
+- Live beta.18 loading through chrome://extensions, a real browser Downloads API
   transfer, actual Chrome close/reopen, fresh machine without dependencies.
   The automation browser rejects the internal chrome: protocol; it was not bypassed.
 - Intel Mac, Windows or Linux execution; live/low-latency HLS; DRM; all timestamp,

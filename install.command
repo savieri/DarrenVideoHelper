@@ -23,7 +23,7 @@ for arg in "$@"; do
   esac
 done
 [[ "$(uname -s)" == Darwin ]] || { echo 'macOS only. Windows/Linux Full is unsupported.' >&2; exit 1; }
-echo 'DarrenVideoHelper Full v1.2.1-beta.17 — dependency check'
+echo 'DarrenVideoHelper Full v1.2.1-beta.18 — dependency check'
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 PYTHON="$(command -v python3 || true)"
 [[ -n "$PYTHON" ]] && "$PYTHON" -c 'import sys; assert sys.version_info >= (3,11)' || {

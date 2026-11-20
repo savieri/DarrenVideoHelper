@@ -20,7 +20,7 @@ from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl
 
-HOST_VERSION = "1.2.1-beta.17"
+HOST_VERSION = "1.2.1-beta.18"
 DEFAULT_OUTPUT_DIR = Path.home() / "Downloads" / "video_downloads"
 LOG_PATH = Path(os.environ.get("VIDEO_HELPER_LOG_PATH") or Path.home() / "Library/Logs/DarrenVideoHelper/native-host.log")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}

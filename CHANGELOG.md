@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.1-beta.18 — 2026-11-20
+
+- Fix worker registration failure caused by the removed commands Manifest declaration and stale unconditional listener; make API mocks match the real Manifest.
+- Save durable jobs before session credentials; bound and coalesce detection caches, migrate legacy jobs safely, compact saved diagnostic tails and preserve unrelated settings.
+- Handle opaque file-document postMessage targets without weakening website CSP.
+- Document unsigned/unnotarized installer handling and actual acceptance-test limits.
+- Pass 113 regressions (60 JavaScript + 53 Python) and rerun real Native protocol recovery checks. Keep the beta.17 HLS engine and prerelease status.
+
 ## 1.2.1-beta.17 — 2026-11-20
 
 - Add checkpointed VOD HLS transfer with per-fragment SHA-256 receipts, finite HTTP recovery, persistent Retry-After and conservative manifest/content validation before reuse.

@@ -2,7 +2,7 @@
 
 Detect video resources in the current tab and download direct MP4/WebM files in Chrome. The optional **macOS Full** edition keeps the beta.15 Native Messaging pipeline: checkpointed HLS + FFmpeg, with pinned yt-dlp for direct/native files, DASH and supported site extractors.
 
-[中文安装指南](README.zh-CN.md) · **v1.2.1-beta.17 — public prerelease**
+[中文安装指南](README.zh-CN.md) · **v1.2.1-beta.18 — public prerelease**
 
 ![Popup rendered from the actual extension HTML, CSS and JavaScript with sample test data](docs/images/popup.png)
 
@@ -10,9 +10,9 @@ Detect video resources in the current tab and download direct MP4/WebM files in 
 
 ## Download
 
-- **[Chrome Extension ZIP — start here](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.17/DarrenVideoHelper-Chrome-Extension.zip)**: no Python, Homebrew, yt-dlp or Terminal for direct MP4/WebM downloads.
-- **[macOS Full ZIP](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.17/DarrenVideoHelper-macOS-Full.zip)**: includes extension, Python host source and installer. **Requires Python 3.11+, FFmpeg and ffprobe. The installer downloads hash-pinned yt-dlp 2026.10.26 into a private project runtime; Internet is required. Runtimes are not bundled.**
-- [Release notes and checksums](https://github.com/savieri/DarrenVideoHelper/releases/tag/v1.2.1-beta.17)
+- **[Chrome Extension ZIP — start here](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.18/DarrenVideoHelper-Chrome-Extension.zip)**: no Python, Homebrew, yt-dlp or Terminal for direct MP4/WebM downloads.
+- **[macOS Full ZIP](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.18/DarrenVideoHelper-macOS-Full.zip)**: includes extension, Python host source and installer. **Requires Python 3.11+, FFmpeg and ffprobe. The installer downloads hash-pinned yt-dlp 2026.10.26 into a private project runtime; Internet is required. Runtimes are not bundled.**
+- [Release notes and checksums](https://github.com/savieri/DarrenVideoHelper/releases/tag/v1.2.1-beta.18)
 
 ## Install the Chrome extension
 
@@ -28,6 +28,8 @@ Direct downloads use Chrome's default Downloads folder, inside **DarrenVideoHelp
 
 Chrome requires these manual steps for an unpacked extension. This is not a Chrome Web Store install and cannot be installed by clicking a ZIP.
 
+**beta.18 fixes the worker startup and session-quota failures reported in beta.17.** [Hotfix evidence](docs/REPAIR_REPORT_beta18.md). The screenshot above is the existing sample UI, not live download proof.
+
 ## Install macOS Full
 
 1. Download and unzip **DarrenVideoHelper-macOS-Full.zip**.
@@ -36,7 +38,7 @@ Chrome requires these manual steps for an unpacked extension. This is not a Chro
    brew install python ffmpeg
    ```
    If you do not have Homebrew or want no Terminal setup, use the Chrome edition for direct files. **Full is not a zero-dependency package.**
-3. Double-click **install.command**. It checks Python/FFmpeg, creates a private venv with hash-pinned yt-dlp 2026.10.26, runs the host self-test and registers the Native Host for your user account. It does not install Homebrew, alter global yt-dlp, remove quarantine or modify Chrome security settings.
+3. Double-click **install.command**. **This script is unsigned and not notarized.** If macOS says it cannot verify the file, click **Done**. After confirming it came from this repository Release, you may choose **System Settings → Privacy & Security → Open Anyway** for this specific script, following [Apple’s instructions](https://support.apple.com/en-us/102445). This is a user-approved exception, not Apple verification. Then run the installer. It checks Python/FFmpeg, creates a private venv with hash-pinned yt-dlp 2026.10.26, runs the host self-test and registers the Native Host for your user account. It does not install Homebrew, alter global yt-dlp, remove quarantine or modify Chrome security settings.
 4. In `chrome://extensions`, enable Developer mode, click **Load unpacked** and select the included **extension/** folder.
 5. Play a video and open the popup. Direct files use Chrome by default; HLS/DASH/site extraction uses the installed host. For a direct file needing captured request headers or MP4 conversion, enable **Full: direct MP4/WebM via Native Host** in Options and select/download the resource again. Retrying an old job keeps its original engine.
 
@@ -74,9 +76,9 @@ choose **重新检测并恢复**. **验证后续传** appears only for verified 
 Retry starts a new attempt; Cancel offers retention, and **清理恢复数据** affects
 only that job. A server that keeps refusing access remains an error.
 
-**100 regression tests passed**, plus real Native process-kill recovery and a
-2482-segment / 2.2 GiB generated-media stress test. [Detailed repair report](docs/REPAIR_REPORT_beta17.md)
-· [Validation and limitations](VALIDATION.md). Original-site 403 resolution is not claimed.
+**113 regression tests passed**, plus real Native process-kill recovery and a
+2482-segment / 2.2 GiB generated-media stress evidence from beta.17 (unchanged HLS engine). [Detailed repair report](docs/REPAIR_REPORT_beta17.md)
+· [Startup/storage hotfix report](docs/REPAIR_REPORT_beta18.md) · [Validation and limitations](VALIDATION.md). Original-site 403 resolution is not claimed.
 
 ## Limits
 

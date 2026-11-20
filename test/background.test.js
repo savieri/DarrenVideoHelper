@@ -14,13 +14,14 @@ function event() {
   };
 }
 
-function loadBackground() {
-  const storage = { downloadHistory: [] };
+function loadBackground({ manifest, sessionLimit = 10 * 1024 * 1024, sessionSeed = {}, localSeed = {} } = {}) {
+  const storage = { downloadHistory: [], ...localSeed };
+  const sessionStorage = { ...sessionSeed };
+  manifest ||= JSON.parse(fs.readFileSync(path.join(__dirname, '../extension/manifest.json'), 'utf8'));
   const chrome = {
-    commands: { onCommand: event() },
     runtime: {
       lastError: null,
-      getManifest: () => ({ permissions: ["nativeMessaging"], version_name: "1.2.1-beta.16" }),
+      getManifest: () => manifest,
       onInstalled: event(),
       onMessage: event(),
       reload() {},
@@ -32,7 +33,15 @@ function loadBackground() {
     scripting: { executeScript: async () => [] },
     alarms: { onAlarm: event(), create: async () => {}, clear: async () => {} },
     storage: {
-      session: { async get(defaults) { return { ...defaults }; }, async set() {} },
+      session: {
+        async get(defaults) { return defaults === null ? { ...sessionStorage } : { ...defaults, ...sessionStorage }; },
+        async set(values) {
+          if (JSON.stringify({ ...sessionStorage, ...values }).length * 2 > sessionLimit) throw new Error('Session storage quota bytes exceeded. Values were not stored.');
+          Object.assign(sessionStorage, values);
+        },
+        async remove(keys) { for (const key of [keys].flat()) delete sessionStorage[key]; },
+        async getBytesInUse() { return JSON.stringify(sessionStorage).length * 2; }
+      },
       local: {
         async get(defaults) { return { ...defaults, ...storage }; },
         async set(values) { Object.assign(storage, values); }
@@ -61,6 +70,7 @@ function loadBackground() {
       onBeforeSendHeaders: event()
     }
   };
+  if (manifest.commands) chrome.commands = { onCommand: event() };
   const context = vm.createContext({
     AbortController,
     URL,
@@ -77,7 +87,7 @@ function loadBackground() {
   });
   const source = fs.readFileSync(path.join(__dirname, "../extension/background.js"), "utf8");
   vm.runInContext(source, context, { filename: "background.js" });
-  return { context, storage };
+  return { context, storage, sessionStorage };
 }
 
 function evaluate(context, expression) {
@@ -969,4 +979,99 @@ test("browser cookie extraction is opt-in and unrelated request cookies are not 
       media:state.headersByUrl.get(headerKey("https://cdn.test/video.m3u8"))};})()`);
   assert.equal(result.enabled,false);assert.equal(result.unrelated.cookie,undefined);
   assert.equal(result.unrelated.referer,"https://site.test/watch");assert.equal(result.media.cookie,"media-session");
+});
+
+for (const full of [true, false]) test(`manifest-gated worker boot succeeds without undeclared commands API: full=${full}`, async () => {
+  const manifest=JSON.parse(fs.readFileSync(path.join(__dirname,'../extension/manifest.json'),'utf8'));
+  if (!full) manifest.permissions=manifest.permissions.filter(p=>p!=='nativeMessaging');
+  const {context}=loadBackground({manifest});
+  assert.equal(await evaluate(context,'jobsReady.then(()=>jobsInitialized)'),true);
+  assert.equal(evaluate(context,'typeof chrome.commands'),'undefined');
+});
+
+test('session quota rejection cannot block durable jobs or create a duplicate task', async () => {
+  const {context,storage}=loadBackground({sessionLimit:1});
+  const result=await evaluate(context,`(async()=>{await jobsReady;
+    const payload={url:'https://cdn.test/current.mp4',kind:'mp4',browserDownload:true,fingerprint:'quota',sourceTitle:'Quota',headers:{cookie:'session-only',authorization:'fixture-only'}};
+    const first=await enqueueDownload(payload,{skipDownloaded:false},{quiet:true});
+    const second=await enqueueDownload(payload,{skipDownloaded:false},{quiet:true});
+    jobs.clear();await restoreDownloadJobs();return {first:first.jobId,second:second.jobId,count:jobs.size,id:[...jobs.keys()][0]};})()`);
+  assert.equal(result.first,result.second);assert.equal(result.count,1);assert.equal(result.id,result.first);
+  assert.ok(!JSON.stringify(storage.downloadJobsV8).includes('session-only'));
+  assert.ok(!JSON.stringify(storage.downloadJobsV8).includes('fixture-only'));
+});
+
+test('legacy session-only jobs migrate before oversized caches are evicted', async () => {
+  const saved={id:'legacy-only',status:'completed',payload:{url:'https://cdn.test/old.mp4',kind:'mp4'},logs:['x'.repeat(200000)]};
+  const {context,storage,sessionStorage}=loadBackground({sessionSeed:{downloadJobsV6:[saved],downloadQueuePausedV6:true,'activeDetection:999':{savedAt:1,padding:'x'.repeat(200000)}}});
+  await evaluate(context,'jobsReady');
+  assert.equal(storage.downloadJobsV8[0].id,'legacy-only');assert.equal(storage.downloadQueuePausedV9,true);
+  assert.equal(sessionStorage.downloadJobsV6,undefined);
+});
+
+test('many large tab snapshots stay bounded while live detected resources remain intact', async () => {
+  const {context,sessionStorage}=loadBackground();
+  const result=await evaluate(context,`(async()=>{await jobsReady;const pending=[];
+    for(let tab=1;tab<=24;tab++){const state=ensureVideoSession(tab,{pageUrl:'https://site.test/watch/'+tab});
+      for(let n=0;n<80;n++){const url='https://cdn.test/'+tab+'/'+n+'.mp4?token='+('x'.repeat(1800));
+        state.streams.set(streamKey(url),{url,kind:'mp4',id:streamKey(url),lastSeen:n,headers:{cookie:'x'.repeat(2000)}})}
+      pending.push(persistDetectionState(tab));}
+    await Promise.all(pending);return {live:tabState.get(1).streams.size,budget:SESSION_CACHE_BYTES};})()`);
+  assert.equal(result.live,80);assert.ok(JSON.stringify(sessionStorage).length*2<=result.budget);
+  assert.ok(Object.keys(sessionStorage).filter(k=>k.startsWith('activeDetection:')).length<24);
+});
+
+test('persistence bursts coalesce and save the newest session and task state', async () => {
+  const {context,storage,sessionStorage}=loadBackground();
+  const result=await evaluate(context,`(async()=>{await jobsReady;let detectionSets=0,jobSets=0;
+    const sessionSet=chrome.storage.session.set;chrome.storage.session.set=async v=>{if(Object.keys(v).some(k=>k.startsWith('activeDetection:')))detectionSets++;await sessionSet(v)};
+    const localSet=chrome.storage.local.set;chrome.storage.local.set=async v=>{jobSets++;await localSet(v)};
+    const state=ensureVideoSession(33,{pageUrl:'https://site.test/watch'}),pending=[];
+    jobs.set('burst',{id:'burst',status:'completed',payload:{url:'https://cdn.test/a.mp4'},logs:[]});
+    for(let n=0;n<200;n++){state.pageTitle='title-'+n;jobs.get('burst').percent=String(n);pending.push(persistDetectionState(33),persistDownloadJobs())}
+    await Promise.all(pending);return {detectionSets,jobSets};})()`);
+  assert.equal(sessionStorage['activeDetection:33'].pageTitle,'title-199');
+  assert.equal(storage.downloadJobsV8[0].percent,'199');assert.ok(result.detectionSets<=2);assert.ok(result.jobSets<=2);
+});
+
+test('saved diagnostic tails are bounded and live logs are retained', async () => {
+  const {context,storage}=loadBackground();
+  const length=await evaluate(context,`(async()=>{await jobsReady;
+    const job={id:'log-tail',status:'completed',payload:{url:'https://cdn.test/a.mp4'},logs:Array(140).fill('x'.repeat(600)),flowLog:Array.from({length:120},()=>({at:1,event:'event',details:{body:'x'.repeat(10000)}}))};
+    jobs.set(job.id,job);await persistDownloadJobs();return job.logs.length;})()`);
+  assert.equal(length,140);assert.equal(storage.downloadJobsV8[0].logs.length,12);
+  assert.ok(JSON.stringify(storage.downloadJobsV8).length<15000);
+});
+
+test('session credentials restore by job ID without writing them to durable job records', async () => {
+  const saved={id:'credential-job',status:'queued',payload:{url:'https://cdn.test/a.mp4',kind:'mp4',headers:{referer:'https://site.test/watch'}},logs:[]};
+  const {context,storage}=loadBackground({localSeed:{downloadJobsV8:[saved],downloadQueuePausedV9:true},sessionSeed:{downloadJobCredentialsV9:{'credential-job':{payload:{headers:{cookie:'private-fixture'}}}}}});
+  await evaluate(context,'jobsReady');
+  assert.equal(evaluate(context,"jobs.get('credential-job').payload.headers.cookie"),'private-fixture');
+  assert.ok(!JSON.stringify(storage.downloadJobsV8).includes('private-fixture'));
+});
+
+test('durable persistence failure stops enqueue before any download dispatch', async () => {
+  const {context}=loadBackground();
+  const result=await evaluate(context,`(async()=>{await jobsReady;let dispatched=0;
+    chrome.storage.local.set=async()=>{throw new Error('local quota fixture')};startNativeJob=async()=>dispatched++;
+    try{await enqueueDownload({url:'https://cdn.test/a.m3u8',kind:'hls_media'},{skipDownloaded:false},{quiet:false})}catch(error){return {message:error.message,count:jobs.size,dispatched}}})()`);
+  assert.match(result.message,/local quota/);assert.equal(result.count,0);assert.equal(result.dispatched,0);
+});
+
+test('failed legacy migration preserves the original session job data', async () => {
+  const saved={id:'unmigrated',status:'completed',payload:{url:'https://cdn.test/a.mp4'},logs:[]};
+  const {context,sessionStorage}=loadBackground({sessionSeed:{downloadJobsV6:[saved]}});
+  evaluate(context,"chrome.storage.local.set=async()=>{throw new Error('injected local quota')}");
+  await evaluate(context,'jobsReady');
+  assert.equal(sessionStorage.downloadJobsV6[0].id,'unmigrated');
+});
+
+test('session eviction preserves unrelated settings and required durable jobs', async () => {
+  const {context,storage,sessionStorage}=loadBackground({sessionLimit:1024,sessionSeed:{unrelatedSetting:'keep'}});
+  await evaluate(context,`(async()=>{await jobsReady;
+    await writeSessionCache({'activeDetection:9':{savedAt:1,padding:'x'.repeat(2000)}});
+    await persistDownloadJobs();})()`);
+  assert.equal(sessionStorage.unrelatedSetting,'keep');assert.ok(Array.isArray(storage.downloadJobsV8));
+  assert.equal(sessionStorage['activeDetection:9'],undefined);
 });

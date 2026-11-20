@@ -8,6 +8,8 @@ function loadContent(initialHref) {
   const documentListeners = new Map();
   const windowListeners = new Map();
   const sent = [];
+  const posted = [];
+  const runtimeListeners = [];
   const location = { href: initialHref, origin: new URL(initialHref).origin };
   const document = {
     title: "Video A",
@@ -28,7 +30,7 @@ function loadContent(initialHref) {
     chrome: {
       runtime: {
         lastError: null,
-        onMessage: { addListener() {} },
+        onMessage: { addListener(listener) { runtimeListeners.push(listener); } },
         sendMessage(message, callback) {
           sent.push(message);
           callback?.();
@@ -46,7 +48,7 @@ function loadContent(initialHref) {
       listeners.push(listener);
       windowListeners.set(name, listeners);
     },
-    postMessage() {}
+    postMessage(message, target) { posted.push({ message, target }); }
   };
   sandbox.window = sandbox;
   const context = vm.createContext(sandbox);
@@ -55,6 +57,8 @@ function loadContent(initialHref) {
   return {
     context,
     sent,
+    posted,
+    runtimeListeners,
     documentListeners,
     windowListeners,
     dispatchDocument(name) {
@@ -82,4 +86,11 @@ test("YouTube finish is delivered after a post-commit duplicate start for the sa
   const navigations = harness.sent.filter((message) => message.type === "videoNavigation");
   assert.deepEqual(navigations.map((message) => message.navigation.phase), ["commit", "start", "finish"]);
   assert.equal(navigations.at(-1).navigation.pageIdentity, "youtube:videoB");
+});
+
+test('content requests on opaque file pages never use file:// as postMessage target', () => {
+  const harness=loadContent('file:///tmp/generated-fixture.html');
+  harness.context.location.origin='file://';
+  for(const listener of harness.runtimeListeners) listener({type:'refreshSiteMedia'},{},()=>{});
+  assert.equal(harness.posted.length,1);assert.equal(harness.posted[0].target,'*');
 });

@@ -19,3 +19,9 @@ runtime. No Windows/Linux release is supported. Intel Mac is untested.
 Keep the extracted extension directory after loading. Both editions share extension ID
 mabnjnddplpelefjgohbjcoajnimpgna; remove the old unpacked entry before switching editions.
 The installer is not notarized. It does not disable security protections or remove quarantine.
+
+## macOS blocks install.command / macOS 阻止打开
+
+This installer is unsigned and not notarized. Click Done. If you trust the file from this repository Release, you may allow this specific script in System Settings → Privacy & Security → Open Anyway, following https://support.apple.com/en-us/102445. This is not Apple verification. Do not disable Gatekeeper or remove quarantine globally. The Chrome edition does not require this script.
+
+安装脚本尚未签名、公证。先点 Done；确认来自本仓库 Release 后，可在系统设置 → 隐私与安全性查看该文件并选择 Open Anyway。安装成功后加载 Full/extension/。两个发行版共享 ID，只加载一个；升级后刷新视频网页。

@@ -206,7 +206,7 @@
         type: "request-bilibili-media",
         pageIdentity: pageIdentity(),
         at: Date.now()
-      }, location.origin === "null" ? "*" : location.origin);
+      }, /^https?:$/.test(new URL(location.href).protocol) ? location.origin : "*");
       window.setTimeout(() => {
         const media = lastSiteMediaContext?.pageIdentity === pageIdentity()
           ? lastSiteMediaContext
@@ -382,7 +382,7 @@
         type: "request-bilibili-media",
         pageIdentity: pageIdentity(),
         at: Date.now()
-      }, location.origin === "null" ? "*" : location.origin);
+      }, /^https?:$/.test(new URL(location.href).protocol) ? location.origin : "*");
     }
     schedule();
   }, 500);

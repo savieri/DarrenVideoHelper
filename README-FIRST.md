@@ -1,4 +1,4 @@
-# Start here / 先看这里 — v1.2.1-beta.17
+# Start here / 先看这里 — v1.2.1-beta.18
 
 For the simplest setup, download DarrenVideoHelper-Chrome-Extension.zip from the
 GitHub Release. Unzip → chrome://extensions → Developer mode → Load unpacked →
@@ -13,3 +13,5 @@ Run install.command, then load extension/. Full is not a zero-dependency install
 HLS/DASH/site extraction uses the native pipeline. Both editions use Chrome for direct files.
 
 Read README.md / README.zh-CN.md for downloads, limitations and troubleshooting.
+
+macOS may block the unsigned, unnotarized install.command. Click Done; if you trust the Release source, see README.zh-CN.md for Apple’s per-file Open Anyway process. Chrome-only does not run this script.

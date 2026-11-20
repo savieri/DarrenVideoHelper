@@ -11,8 +11,8 @@ ROOT=Path(__file__).resolve().parents[1]
 def check_extension(files, native):
     m=json.loads(files['manifest.json'])
     assert m['manifest_version']==3
-    assert m['version_name']=='1.2.1-beta.17'
-    assert m['version']=='1.2.1.17'
+    assert m['version_name']=='1.2.1-beta.18'
+    assert m['version']=='1.2.1.18'
     assert ('nativeMessaging' in m['permissions']) is native
     assert 'downloads' in m['permissions']
     h=hashlib.sha256(base64.b64decode(m['key'])).hexdigest()[:32]

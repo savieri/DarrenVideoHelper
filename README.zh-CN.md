@@ -2,7 +2,7 @@
 
 检测当前网页的视频资源，直接在 Chrome 下载 MP4/WebM。macOS Full 保留 beta.15 的 Native Messaging 下载链路：新增检查点 HLS + FFmpeg，保留固定版本 yt-dlp 处理站点解析等，处理 HLS、分离音视频和支持的站点解析。
 
-[English](README.md) · **v1.2.1-beta.17，公开预发布版**
+[English](README.md) · **v1.2.1-beta.18，公开预发布版**
 
 ![由真实插件 HTML、CSS、JS 在 Chrome 渲染的界面，使用示例测试数据](docs/images/popup.png)
 
@@ -10,7 +10,7 @@
 
 ## 下载与安装
 
-**[Chrome 独立版 ZIP（普通用户优先下载）](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.17/DarrenVideoHelper-Chrome-Extension.zip)** · [macOS Full ZIP](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.17/DarrenVideoHelper-macOS-Full.zip) · [版本说明及校验值](https://github.com/savieri/DarrenVideoHelper/releases/tag/v1.2.1-beta.17)
+**[Chrome 独立版 ZIP（普通用户优先下载）](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.18/DarrenVideoHelper-Chrome-Extension.zip)** · [macOS Full ZIP](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.18/DarrenVideoHelper-macOS-Full.zip) · [版本说明及校验值](https://github.com/savieri/DarrenVideoHelper/releases/tag/v1.2.1-beta.18)
 
 Chrome 独立版下载直接 MP4/WebM 时，不需要 Python、Homebrew、yt-dlp 或 Terminal。
 
@@ -66,7 +66,7 @@ Chrome 安全机制要求手动加载；ZIP 不能点击后自动装入 Chrome�
 
 需要操作时，回原视频页面正常播放/授权，再点“重新检测并恢复”。只有保留了可验证数据才显示“验证后续传”。取消时可选择保留恢复数据；“清理恢复数据”只清理本任务。服务器持续拒绝时会停止，不保证 403 都能恢复。
 
-**100 项回归通过**，另完成真实 Native 进程被杀后的续传及 2482 分片、2.2 GiB 生成视频压力测试。[完整修复报告](docs/REPAIR_REPORT_beta17.md) · [测试范围](VALIDATION.md)。尚未宣称目标网站已修复。
+**113 项回归通过**，另重新验证真实 Native 进程被杀后的续传；2482 分片、2.2 GiB 压力结果为 beta.17 已完成的实测，本次 HLS 引擎未改动。[完整修复报告](docs/REPAIR_REPORT_beta17.md) · [测试范围](VALIDATION.md)。尚未宣称目标网站已修复。
 
 ## 已知限制
 
@@ -99,3 +99,11 @@ manifest 中是保持固定 ID 的**公钥**，不包含签名私钥。项目源
 开发者安装 Node.js、Python 3.11+ 后执行 `bash scripts/test.sh`，可运行回归测试、打包和结构检查。直接运行 `python3 scripts/build_release.py` 会生成两个 ZIP 和 SHA256SUMS。JS 和资源在两个版本之间一致；Chrome 包仅移除 nativeMessaging 权限。GitHub 自动 Source code 对应发布 Tag，beta.15 的导入和校验清单保留在 Git 历史中。
 
 默认只为已识别的媒体保留请求 Cookie。读取本机 Chrome Cookie 数据库是独立的可选功能，新安装默认关闭；已有保存偏好不变。没有扩展名、首次仅通过响应识别的媒体，可能需要播放器再次请求后才能捕获媒体授权。
+
+## beta.18 加载故障修复与 macOS 放行
+
+已修复 beta.17 的后台注册失败与会话缓存超限，详见 [逐项修复报告](docs/REPAIR_REPORT_beta18.md)。旧版 HLS 检查点继续保留。上图为样例 UI，不是实际下载证明。
+
+`install.command` 尚未签名、公证。若 macOS 提示无法验证，先点 **Done**；确认来自本仓库 Release 后，可到 **系统设置 → 隐私与安全性 → Open Anyway（仍要打开）**，针对该脚本明确放行；见 [Apple 官方说明](https://support.apple.com/en-us/102445)。这不是已经通过 Apple 检查的证明，无需关闭 Gatekeeper 或删除隔离属性。Full 仍需 Python 3.11+ 和 FFmpeg/ffprobe。
+
+Chrome 独立版和 Full 共享扩展 ID，只加载其中一个。要下载 HLS，安装 Full 后加载 **Full 文件夹里的 extension/**。升级后刷新视频网页，使旧的 content script 换成新版。
