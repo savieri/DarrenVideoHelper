@@ -28,3 +28,8 @@ native/host_launcher*
 native/bin/*
 !native/bin/README.md
 release/
+# Never publish local runtime environments or private audit material.
+runtime/
+.runtime/
+private-*
+*.control.json

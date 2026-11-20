@@ -13,7 +13,7 @@ def entries():
     for folder in ('extension', 'native', 'scripts', 'docs', 'test'):
         for p in sorted((ROOT / folder).rglob('*')):
             if p.is_file() and '__pycache__' not in p.parts and p.suffix != '.pyc':
-                if folder == 'native' and p != ROOT / 'native/host.py' and p != ROOT / 'native/bin/README.md':
+                if folder == 'native' and p.relative_to(ROOT/'native').as_posix() not in {'host.py','hls_engine.py','requirements.txt','bin/README.md'}:
                     raise RuntimeError('Unreviewed native runtime file: ' + str(p))
                 yield p.relative_to(ROOT).as_posix(), p.read_bytes()
     for name in ('install.command', 'uninstall.command', 'README-FIRST.md', 'README.md', 'README.zh-CN.md',

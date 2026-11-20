@@ -10,9 +10,9 @@ Chrome 独立版：下载 → 解压 → `chrome://extensions` → 开发者模�
 加载已解压的扩展程序 → 选择直接包含 manifest.json 的文件夹 → 视频网页播放几秒 → 点击插件。
 HLS/DASH 只能检测，下载需要 Full。直接下载到 Chrome 默认下载目录的 DarrenVideoHelper/。
 
-macOS Full: install Python 3.9+, yt-dlp, FFmpeg and ffprobe first
-(`brew install python yt-dlp ffmpeg` for existing Homebrew users). Double-click
-install.command; then manually load extension/. Full is not a self-contained
+macOS Full: install Python 3.11+, FFmpeg and ffprobe first
+(`brew install python ffmpeg` for existing Homebrew users). Double-click
+install.command; it installs hash-pinned yt-dlp 2026.10.26 into a private venv (Internet required), then manually load extension/. Full is not a self-contained
 runtime. No Windows/Linux release is supported. Intel Mac is untested.
 
 完整说明、常见错误及测试限制见仓库 README.zh-CN.md / README.md。

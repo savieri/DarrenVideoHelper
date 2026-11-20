@@ -918,3 +918,55 @@ for (const [full,nativeDirect,browser] of [[true,true,false],[true,false,true],[
     assert.equal(result.referer,'https://site.test/watch');
   });
 }
+
+test("rapid parallel Download requests create exactly one native task", async () => {
+  const {context}=loadBackground();
+  const result=await evaluate(context,`(async()=>{await jobsReady;
+    const payload={url:"https://cdn.test/current.m3u8",kind:"hls_media",fingerprint:"same-asset",sessionId:"session-one",resourceId:"resource-one",sourceTitle:"Current"};
+    const responses=await Promise.all(Array.from({length:20},()=>enqueueDownload(payload,{skipDownloaded:false},{quiet:true})));
+    return {count:jobs.size,ids:new Set(responses.map(r=>r.jobId)).size};})()`);
+  assert.equal(result.count,1);assert.equal(result.ids,1);
+});
+
+test("duplicate resume callbacks dispatch a native task only once", async () => {
+  const {context}=loadBackground();
+  const result=await evaluate(context,`(async()=>{await jobsReady;let dispatched=0;
+    startNativeJob=async()=>{dispatched++;await Promise.resolve()};
+    const j={id:"duplicate-resume",status:"downloading",payload:{exactSelection:true,settings:{}},logs:[]};jobs.set(j.id,j);
+    await Promise.all([resumeJobDownload(j,j.payload),resumeJobDownload(j,j.payload)]);
+    return {dispatched,claims:nativeDispatchClaims.size,events:j.flowLog.filter(x=>x.event==="NATIVE_DISPATCH").length};})()`);
+  assert.equal(result.dispatched,1);assert.equal(result.claims,0);assert.equal(result.events,1);
+});
+
+test("native ledger supplies verified resumability instead of a generic incomplete label", async () => {
+  const {context}=loadBackground();
+  const result=await evaluate(context,`(async()=>{await jobsReady;
+    const j={id:"ledger-resume",status:"downloading",payload:{},logs:[]};jobs.set(j.id,j);
+    queryNativeJob=async()=>({active:false,state:{status:"attention",canResume:false,httpStatus:403,errorCode:"HTTP_403",message:"服务器拒绝",fragmentsDone:0}});
+    await reconcileNativeJob(j);return {status:j.status,canResume:j.canResume,httpStatus:j.httpStatus};})()`);
+  assert.equal(result.status,'attention');assert.equal(result.canResume,false);assert.equal(result.httpStatus,403);
+});
+
+test("a full fragment progress bar remains Verifying until native completion", async () => {
+  const {context}=loadBackground();
+  const result=await evaluate(context,`(async()=>{await jobsReady;
+    const r=await enqueueDownload({url:"https://cdn.test/current.m3u8",fingerprint:"verify",sourceTitle:"Current"},{skipDownloaded:false},{quiet:true});
+    const onMessage={addListener(fn){this.listener=fn}},onDisconnect={addListener(fn){this.listener=fn}};
+    chrome.runtime.connectNative=()=>({onMessage,onDisconnect,postMessage(){},disconnect(){}});
+    const j=jobs.get(r.jobId);await startNativeJob(j,{});
+    await onMessage.listener({type:"progress",jobId:j.id,attemptId:j.attemptId,stage:"verifying",percent:"100",fragmentsDone:2482,fragmentsTotal:2482});
+    return {status:j.status,percent:j.percent,fragmentsDone:j.fragmentsDone};})()`);
+  assert.equal(result.status,'verifying');assert.equal(result.percent,'100');assert.equal(result.fragmentsDone,2482);
+});
+
+test("browser cookie extraction is opt-in and unrelated request cookies are not retained", async () => {
+  const {context}=loadBackground();
+  const result=await evaluate(context,`(async()=>{await jobsReady;
+    rememberHeaders(1,"https://site.test/private-api",{cookie:"private",referer:"https://site.test/watch"});
+    rememberHeaders(1,"https://cdn.test/video.m3u8",{cookie:"media-session",referer:"https://site.test/watch"});
+    const state=ensureTabState(1);return {enabled:(await loadSettings()).autoCookies,
+      unrelated:state.headersByUrl.get(headerKey("https://site.test/private-api")),
+      media:state.headersByUrl.get(headerKey("https://cdn.test/video.m3u8"))};})()`);
+  assert.equal(result.enabled,false);assert.equal(result.unrelated.cookie,undefined);
+  assert.equal(result.unrelated.referer,"https://site.test/watch");assert.equal(result.media.cookie,"media-session");
+});

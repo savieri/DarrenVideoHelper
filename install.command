@@ -23,16 +23,33 @@ for arg in "$@"; do
   esac
 done
 [[ "$(uname -s)" == Darwin ]] || { echo 'macOS only. Windows/Linux Full is unsupported.' >&2; exit 1; }
-echo 'DarrenVideoHelper Full v1.2.1-beta.16 — dependency check'
+echo 'DarrenVideoHelper Full v1.2.1-beta.17 — dependency check'
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 PYTHON="$(command -v python3 || true)"
-[[ -n "$PYTHON" ]] && "$PYTHON" -c 'import sys; assert sys.version_info >= (3,9)' || {
- echo 'Python 3.9+ is required. Install dependencies: brew install python yt-dlp ffmpeg' >&2; exit 1;
+[[ -n "$PYTHON" ]] && "$PYTHON" -c 'import sys; assert sys.version_info >= (3,11)' || {
+ echo 'Python 3.11+ is required. Install dependencies: brew install python ffmpeg' >&2; exit 1;
 }
-for tool in yt-dlp ffmpeg ffprobe; do
-  command -v "$tool" >/dev/null || { echo "Missing $tool. Install dependencies: brew install python yt-dlp ffmpeg" >&2; exit 1; }
+"$PYTHON" - "$INSTALL_ROOT" "$MANIFEST_DIR" <<'PYTHON'
+import pathlib,sys
+for raw in sys.argv[1:]:
+ p=pathlib.Path(raw).expanduser().absolute()
+ if p in (pathlib.Path('/'),pathlib.Path.home()):raise SystemExit('Unsafe installation directory')
+ for parent in (p,*p.parents):
+  if parent.is_symlink() and str(parent) not in ('/var','/tmp'):raise SystemExit('Installation directories cannot contain symlinks')
+PYTHON
+for tool in ffmpeg ffprobe; do
+  command -v "$tool" >/dev/null || { echo "Missing $tool. Install dependencies: brew install python ffmpeg" >&2; exit 1; }
 done
 export VIDEO_HELPER_EXTERNAL_TOOLS=1
+RUNTIME_DIR="$INSTALL_ROOT/runtime"
+if [[ "$CHECK_ONLY" -eq 0 ]]; then
+  echo 'Installing the project-local, hash-verified yt-dlp 2026.10.26 runtime (Internet required).'
+  "$PYTHON" -m venv "$RUNTIME_DIR"
+  "$RUNTIME_DIR/bin/python3" -m pip --isolated install --disable-pip-version-check --require-hashes -r "$PACKAGE_ROOT/native/requirements.txt"
+fi
+export VIDEO_HELPER_YTDLP_PATH="${VIDEO_HELPER_YTDLP_PATH:-$RUNTIME_DIR/bin/yt-dlp}"
+[[ -x "$VIDEO_HELPER_YTDLP_PATH" ]] || { echo 'Pinned runtime missing. Run install.command once without --check.' >&2; exit 1; }
+[[ "$("$VIDEO_HELPER_YTDLP_PATH" --version)" == 2026.10.26 ]] || { echo 'Expected yt-dlp 2026.10.26.' >&2; exit 1; }
 "$PYTHON" "$PACKAGE_ROOT/native/host.py" --self-test
 EXTENSION_ID="$("$PYTHON" - "$PACKAGE_ROOT/extension/manifest.json" <<'PY'
 import base64,hashlib,json,sys
@@ -44,10 +61,12 @@ PY
 [[ "$CHECK_ONLY" -eq 0 ]] || { echo 'Dependency and extension-ID checks passed; nothing installed.'; exit 0; }
 mkdir -p "$NATIVE_INSTALL_DIR" "$MANIFEST_DIR"
 chmod 700 "$INSTALL_ROOT" "$NATIVE_INSTALL_DIR"
-install -m 0644 "$PACKAGE_ROOT/native/host.py" "$NATIVE_INSTALL_DIR/host.py"
+for source in host.py hls_engine.py requirements.txt; do
+ install -m 0644 "$PACKAGE_ROOT/native/$source" "$NATIVE_INSTALL_DIR/$source"
+done
 # Quote the interpreter path safely; never interpolate it into Python code.
 { printf '#!/bin/bash\nset -euo pipefail\nexport PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin\nexport VIDEO_HELPER_EXTERNAL_TOOLS=1\n';
-  printf 'NATIVE_ROOT="$(cd "$(dirname "$0")" && pwd)"\nexec %q "$NATIVE_ROOT/host.py" "$@"\n' "$PYTHON";
+  printf 'NATIVE_ROOT="$(cd "$(dirname "$0")" && pwd)"\nexport VIDEO_HELPER_YTDLP_PATH=%q\nexec %q "$NATIVE_ROOT/host.py" "$@"\n' "$VIDEO_HELPER_YTDLP_PATH" "$PYTHON";
 } > "$HOST_PATH.tmp"
 chmod 0755 "$HOST_PATH.tmp"; mv "$HOST_PATH.tmp" "$HOST_PATH"
 "$HOST_PATH" --self-test

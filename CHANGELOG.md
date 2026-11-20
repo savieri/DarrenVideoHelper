@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.1-beta.17 — 2026-11-20
+
+- Add checkpointed VOD HLS transfer with per-fragment SHA-256 receipts, finite HTTP recovery, persistent Retry-After and conservative manifest/content validation before reuse.
+- Preserve valid partial data on authorization/network failure; stop claiming legacy tasks without checkpoints are resumable.
+- Support tested TS, fMP4/MAP, byte ranges, authorized AES-128 and default separate audio; reject unsupported live/delta/DRM and invalid media.
+- Isolate job/attempt workspaces, atomically publish verified MP4s, preserve merge inputs, and provide scoped cancellation/data cleanup.
+- Serialize enqueue and guard native dispatch, reconcile persisted state, and distinguish Recovering / Requires attention / Verifying from Completed.
+- Use short safe filenames with collision counts, readable dark UI status labels, redacted diagnostics and real output/control actions.
+- Install hash-pinned yt-dlp 2026.10.26 in a private runtime; require Python 3.11+ and external FFmpeg/ffprobe.
+- Make local Chrome cookie-database extraction opt-in for new installs; exclude unrelated request cookies from the context cache.
+- Add 100 regressions, real Native protocol/crash recovery runs and 2482-segment / 2.2 GiB generated-video stress; keep public prerelease status because original-site and live extension acceptance remain unverified.
+
+
 ## 1.2.1-beta.16 — 2026-11-20
 
 Based on the supplied beta.15 source, imported as a separate commit with SHA-256 provenance.

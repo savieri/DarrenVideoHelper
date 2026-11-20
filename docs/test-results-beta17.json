@@ -1,0 +1,79 @@
+{
+  "version": "1.2.1-beta.17",
+  "date": "2026-11-20",
+  "regressions": {
+    "javascript": 47,
+    "python": 53,
+    "total": 100,
+    "passed": 100,
+    "skipped": 0
+  },
+  "environment": {
+    "platform": "Apple Silicon macOS",
+    "python": "3.14",
+    "ffmpeg": "9.0.2",
+    "ytDlp": "2026.10.26"
+  },
+  "nativeProtocol": {
+    "framedPings": 2,
+    "mp4": {
+      "completed": true,
+      "duration": 6.08,
+      "hasAudio": true
+    },
+    "webm": {
+      "completed": true,
+      "duration": 6.081,
+      "hasAudio": true
+    },
+    "hls": {
+      "completed": true,
+      "idempotentReplay": true,
+      "fragments": 6
+    },
+    "killedHostResume": {
+      "completed": true,
+      "verifiedFragmentsBeforeResume": 4,
+      "reusedNonsampledBytes": true
+    },
+    "parallelIsolation": true,
+    "duplicateDispatchBlocked": true,
+    "cancelPreservesVerifiedData": true,
+    "ok": true
+  },
+  "generatedHlsStress": {
+    "ok": true,
+    "generatedMedia": true,
+    "mpegTsNullPadding": true,
+    "sourceBytes": 2362476808,
+    "receivedBytes": 2362553838,
+    "fragments": 2482,
+    "durationSeconds": 7446.08,
+    "outputBytes": 116399789,
+    "hasAudio": true,
+    "fragment828Requests": 3,
+    "pythonPeakRssBytes": 41484288,
+    "elapsedSeconds": 18.35,
+    "remainingWorkFiles": [
+      "checkpoint.json"
+    ]
+  },
+  "notValidated": [
+    "original target CDN",
+    "live extension loading and Downloads API transfer",
+    "actual Chrome restart",
+    "clean machine without dependencies",
+    "Intel Mac / Windows / Linux"
+  ],
+  "fixturePrivacy": "Generated authorized test media only; no original task IDs, source URLs, titles, cookies, personal paths, or private diagnostics.",
+  "extractedMacOSInstaller": {
+    "passed": true,
+    "unicodeAndSpacedPaths": true,
+    "pinnedRuntimeProvisioned": true,
+    "installedSourceParity": true,
+    "manifestOriginAndPath": true,
+    "framedPings": 2,
+    "checkOnlyPassed": true,
+    "liveChromeRegistrationModified": false
+  }
+}

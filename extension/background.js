@@ -10,8 +10,8 @@ const MAX_HEADERS_PER_TAB = 140;
 const MAX_LOG_LINES = 140;
 const NATIVE_START_TIMEOUT_MS = 20 * 1000;
 const NATIVE_HOST_LOG_PATH = "~/Library/Logs/DarrenVideoHelper/native-host.log";
-const ACTIVE_JOB_STATUSES = new Set(["queued", "downloading", "merging"]);
-const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "incomplete"]);
+const ACTIVE_JOB_STATUSES = new Set(["queued", "downloading", "merging", "recovering", "verifying"]);
+const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "incomplete", "attention"]);
 const SESSION_ENRICH_RETRIES = 1;
 const RECENT_MAIN_MEDIA_WINDOW_MS = 90 * 1000;
 const DETECTION_STORAGE_PREFIX = "activeDetection:";
@@ -25,16 +25,20 @@ const DEFAULT_SETTINGS = {
   outputDir: "~/Downloads/video_downloads",
   defaultQuality: "best",
   maxConcurrent: 2,
-  autoCookies: true,
+  autoCookies: false,
   skipDownloaded: true,
   onlyMp4: true,
   nativeDirect: false,
+  networkRetries: 4,
+  networkTimeout: 20,
   showAdvanced: false
 };
 
 const tabState = new Map();
 const jobs = new Map();
 const runningPorts = new Map();
+const nativeDispatchClaims = new Set();
+let enqueueSerial = Promise.resolve();
 let queuePaused = false;
 let processingQueue = false;
 const detectionWrites = new Map();
@@ -475,11 +479,27 @@ function handleRuntimeMessage(message, sender, sendResponse) {
     return true;
   }
   if (message.type === "cancelJob") {
-    cancelJob(message.jobId);
-    sendResponse({ ok: true });
+    cancelJob(message.jobId, message.keepData !== false).then(() => sendResponse({ ok: true })).catch(error => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
+  if (message.type === "resumeWithCurrent") {
+    resumeWithCurrent(message.jobId).then(() => sendResponse({ ok: true })).catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+  if (message.type === "openJobOutput") {
+    const job = jobs.get(message.jobId);
+    if (job?.status !== "completed") { sendResponse({ ok: false, error: "任务尚未完成。" }); return false; }
+    Promise.resolve().then(async () => {
+      if (job.browserDownload) await chrome.downloads.show(job.browserDownloadId);
+      else {
+        const result = await nativeControl(message.jobId, "open");
+        if (result?.type !== "open_ack") throw new Error(result?.message || "无法显示文件。");
+      }
+      sendResponse({ ok: true });
+    }).catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
   if (message.type === "reloadExtension") {
     chrome.runtime.reload();
     sendResponse({ ok: true });
@@ -1734,6 +1754,8 @@ async function exportJobDiagnostics(jobId) {
   const snapshot = {
     version: chrome.runtime.getManifest().version_name, generatedAt: new Date().toISOString(),
     jobId, title: job.title, status: job.status, message: job.message, error: job.error,
+    phase: job.phase, canResume: job.canResume === true, errorCode: job.errorCode, httpStatus: job.httpStatus,
+    fragmentsDone: job.fragmentsDone, fragmentsTotal: job.fragmentsTotal, downloadedBytes: job.downloadedBytes,
     details: job.details, exitCode: job.exitCode ?? null, logs: job.logs, flow: job.flowLog,
     pageUrl: diagnosticUrl(job.pageUrl), resourceUrl: diagnosticUrl(job.payload.url)
   };
@@ -1782,7 +1804,7 @@ async function reconcileNativeJob(job) {
     if (generation !== job.attemptId || job.status === "completed") return;
     const saved = result.state || {};
     if (result.active) {
-      Object.assign(job, { status: "downloading", reconciling: true, message: "本地任务仍在处理，正在恢复状态…" });
+      Object.assign(job, { status: ["recovering","verifying","merging"].includes(saved.status) ? saved.status : "downloading", phase: saved.phase, canResume: Boolean(saved.canResume), reconciling: true, message: "本地任务仍在处理，正在恢复状态…" });
       await chrome.alarms?.create?.(`video-status:${job.id}`, { when: Date.now() + 5000 });
     } else if (saved.status === "completed") {
       // Authoritative disk ledger may repair a beta.7 failed card.
@@ -1793,22 +1815,25 @@ async function reconcileNativeJob(job) {
         message: "下载完成，最终 MP4 已通过校验。" });
       await saveHistory(publicJob(job));
     } else {
-      Object.assign(job, { status: saved.status === "failed" ? "failed" : "incomplete",
+      Object.assign(job, { status: ["failed", "attention", "cancelled"].includes(saved.status) ? saved.status : "incomplete",
         flowState: "INCOMPLETE", reconciling: false, outputPath: saved.outputPath || job.outputPath,
         exitCode: saved.exitCode ?? job.exitCode, error: saved.error || job.error, speed: "", eta: "",
+        canResume: saved.canResume === true, phase: saved.phase || "attention",
+        fragmentsDone: saved.fragmentsDone || 0, fragmentsTotal: saved.fragmentsTotal || 0, downloadedBytes: saved.downloadedBytes || 0,
+        httpStatus: saved.httpStatus, errorCode: saved.errorCode,
         validationPending: Boolean(saved.validationPending),
-        details: saved.details || job.details, message: saved.message || "未确认完成，可重试/续传。" });
+        details: saved.details || job.details, message: saved.message || "下载未完成，请重新检测后重试。" });
     }
   } catch (error) {
     job.status = "incomplete"; job.reconciling = false;
-    job.message = `未确认完成：${error.message} 可稍后重试/续传。`;
+    job.canResume = false; job.message = `暂时无法确认本地任务状态：${error.message} 请稍后重试。`;
   }
   await persistDownloadJobs(); broadcastJob(job);
 }
 
 async function retryJob(jobId) {
   const job = jobs.get(jobId);
-  if (!job || !["incomplete", "failed", "cancelled"].includes(job.status)) return;
+  if (!job || !["incomplete", "failed", "cancelled", "attention"].includes(job.status)) return;
   if (!job.browserDownload) await reconcileNativeJob(job);
   if (job.status === "completed" || job.reconciling) return;
   Object.assign(job, { status: "queued", flowState: "DOWNLOAD_START", retryCount: 0,
@@ -1819,6 +1844,7 @@ async function retryJob(jobId) {
   const resource = state?.streams.get(job.payload.resourceId);
   const sameResource = resource && (resource.lastUrl || resource.url) === job.payload.resourceUrl;
   job.payload = deepFreeze({ ...job.payload, refreshAttempt: 0,
+    settings: { ...job.payload.settings, ...await loadSettings(), outputDir: job.payload.settings?.outputDir || DEFAULT_SETTINGS.outputDir },
     headers: sameResource ? downloadHeaders(state, resource, job.payload.url) : job.payload.headers,
     renditionMasterHeaders: sameResource && job.payload.renditionMasterUrl
       ? downloadHeaders(state, resource, job.payload.renditionMasterUrl) : job.payload.renditionMasterHeaders });
@@ -1842,7 +1868,7 @@ async function transitionJob(job, flowState, message, patch = {}) {
 
 async function failRefreshJob(job, message) {
   if (TERMINAL_JOB_STATUSES.has(job.status)) return;
-  updateJob(job.id, { status: job.outputPath ? "incomplete" : "failed", error: message, message: job.outputPath ? `${message} 未完成，可重试/续传。` : message, flowState: "FAILED" });
+  updateJob(job.id, { status: job.canResume || [401,403].includes(job.httpStatus) ? "attention" : job.outputPath ? "incomplete" : "failed", error: message, message: job.outputPath ? `${message} 数据已保留，请按任务提示重试。` : message, flowState: "FAILED" });
   const port = runningPorts.get(job.id);
   runningPorts.delete(job.id);
   if (port) safeDisconnect(port);
@@ -1932,7 +1958,7 @@ function matchingHlsCandidates(job, state, freshOnly, allowProbe = false) {
     const snapshot = original.mediaSnapshot;
     const active = state.mediaCandidates?.get?.(state.activeMediaId);
     if (snapshot && active) {
-      if (snapshot.videoElementToken && snapshot.videoElementToken !== active.videoElementToken) return false;
+      // A recreated player can still present the same asset; the native manifest/byte checks remain authoritative.
       if (snapshot.frameId != null && snapshot.frameId !== active.frameId) return false;
       if (snapshot.mediaId !== active.mediaId && snapshot.currentSrc && active.currentSrc &&
         mediaPath(snapshot.currentSrc) !== mediaPath(active.currentSrc)) return false;
@@ -1947,13 +1973,13 @@ function matchingHlsCandidates(job, state, freshOnly, allowProbe = false) {
     // A captured matching variant is usable when the old master has expired.
     const title = value => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
     const candidateTitle = state.mediaCandidates?.get?.(state.activeMediaId || stream.mediaId)?.title || state.pageTitle;
-    if (original.pageTitle && candidateTitle && title(original.pageTitle) !== title(candidateTitle)) return false;
+    // Mutable webpage titles do not establish content identity.
     if (original.videoIdentity && state.videoId && state.videoId !== original.videoIdentity) return false;
     const duration = playlistDuration(state, stream) || Number(stream.duration || 0);
     if (duration && original.expectedDuration && Math.abs(duration - original.expectedDuration) > Math.max(10, original.expectedDuration * 0.1)) return false;
     if (stream.kind !== "hls_master" && original.selectedHeight && stream.quality && stream.quality !== original.selectedHeight) return false;
-    if (rejected.has(url)) return false;
     const recent = (state.recentMedia || []).filter(item => item.url === url).at(-1);
+    if (rejected.has(url) && !(freshOnly && recent?.status >= 200 && recent.status < 300 && recent.observedAt >= (job.refreshRequestedAt || 0))) return false;
     if ((recent?.status >= 400 && (freshOnly || url !== job.payload.url)) || expiryRemaining(url) < 60) return false;
     // Player/config snapshots are hints, not evidence of a newly issued request.
     if ((!allowProbe || freshOnly) && (!recent || Date.now() - recent.observedAt > 90000)) return false;
@@ -2033,7 +2059,7 @@ async function requestJobRefresh(job, status) {
     return failRefreshJob(job, `重新获取链接后仍返回 HTTP ${status}，已停止自动重试。`);
   }
   if (!await transitionJob(job, "URL_STALE", "媒体请求失败或链接将过期，正在重新检测…", {
-    retryCount: 1, refreshAttempts: 1, nativeDispatched: false, refreshRequestedAt: Date.now(),
+    status: "recovering", retryCount: 1, refreshAttempts: 1, nativeDispatched: false, refreshRequestedAt: Date.now(),
     refreshDeadline: Date.now() + REFRESH_TIMEOUT_MS,
     rejectedUrls: [...new Set([...(job.rejectedUrls || []), ...([403, 410].includes(Number(status)) ? [job.payload.url] : [])])]
   })) return;
@@ -2048,16 +2074,18 @@ async function requestJobRefresh(job, status) {
 }
 
 async function resumeJobDownload(job, freshPayload) {
-  if (TERMINAL_JOB_STATUSES.has(job.status)) return;
+  if (TERMINAL_JOB_STATUSES.has(job.status) || nativeDispatchClaims.has(job.id) || runningPorts.has(job.id)) return;
+  nativeDispatchClaims.add(job.id);
+  try {
   const tab = !job.payload.exactSelection && job.payload.tabId != null ? await chrome.tabs.get(job.payload.tabId) : null;
   if (tab && !samePageIdentity(tab.url, job.payload.pageUrl)) throw new Error("原视频页面已切换，已停止恢复下载。");
   job.payload = deepFreeze(freshPayload || job.payload);
-  if (!await transitionJob(job, "RESUME_DOWNLOAD", "已获得媒体链接，正在恢复下载…", { nativeDispatched: true, status: "downloading" })) return;
+  if (!await transitionJob(job, job.canResume || job.retryCount ? "RESUME_DOWNLOAD" : "NATIVE_DISPATCH", "已获得媒体链接，正在检查任务数据…", { nativeDispatched: true, status: "downloading" })) return;
   await chrome.alarms?.clear?.(`video-refresh:${job.id}`);
   clearTimeout(refreshTimers.get(job.id)); refreshTimers.delete(job.id);
   clearTimeout(refreshDeadlineTimers.get(job.id)); refreshDeadlineTimers.delete(job.id);
-  logJobFlow(job, "resume download");
   await startNativeJob(job, job.payload.settings || await loadSettings());
+  } finally { nativeDispatchClaims.delete(job.id); }
 }
 
 async function continueRefresh(jobId) {
@@ -2373,7 +2401,13 @@ function buildDownloadPayload(state, stream, settings, options = {}) {
   return deepFreeze(payload);
 }
 
-async function enqueueDownload(payload, settings, options = {}) {
+function enqueueDownload(payload, settings, options = {}) {
+  const pending = enqueueSerial.catch(() => {}).then(() => enqueueDownloadUnlocked(payload, settings, options));
+  enqueueSerial = pending.then(() => {}, () => {});
+  return pending;
+}
+
+async function enqueueDownloadUnlocked(payload, settings, options = {}) {
   await jobsReady;
   if (!payload.browserDownload && !hasNativeMode()) return { ok: false,
     error: "此资源需要 macOS Full + Native Host（HLS / DASH / 站点解析）。Chrome 独立版支持直接 MP4/WebM，不会把 m3u8 当作视频保存。" };
@@ -2432,7 +2466,7 @@ async function enqueueDownload(payload, settings, options = {}) {
     nativeDispatched: false
   };
   jobs.set(jobId, job);
-  logJobFlow(job, "DOWNLOAD_START");
+  logJobFlow(job, "JOB_CREATED");
   await persistDownloadJobs();
   broadcastJob(job);
   if (!options.quiet) processQueue();
@@ -2445,11 +2479,11 @@ async function processQueue() {
   try {
     const settings = await loadSettings();
     const maxConcurrent = Math.max(1, Math.min(6, Number(settings.maxConcurrent) || 2));
-    while (!queuePaused && [...jobs.values()].filter(item => ["downloading", "merging"].includes(item.status)).length < maxConcurrent) {
+    while (!queuePaused && [...jobs.values()].filter(item => ["downloading", "merging", "recovering", "verifying"].includes(item.status)).length < maxConcurrent) {
       const job = Array.from(jobs.values()).find((item) => item.status === "queued");
       if (!job) break;
       try {
-        await transitionJob(job, "DOWNLOAD_START", "正在检查当前媒体链接…", { status: "downloading" });
+        await transitionJob(job, "PREFLIGHT", "正在检查当前媒体链接…", { status: "downloading" });
         if (job.browserDownload) { await startBrowserJob(job); continue; }
         const hls = !job.payload.exactSelection && isHlsKind(job.payload.kind) && job.payload.tabId != null;
         const next = hls ? await sniffJobCandidate(job, false) : job.payload;
@@ -2478,7 +2512,7 @@ async function startNativeJob(job, settings) {
   };
   updateJob(job.id, {
     status: "downloading",
-    message: "Starting native download...",
+    message: "正在连接本地下载引擎并检查恢复数据…",
     percent: "",
     speed: "",
     eta: ""
@@ -2502,7 +2536,7 @@ async function startNativeJob(job, settings) {
   runningPorts.set(job.id, port);
   startTimer = setTimeout(() => {
     const current = jobs.get(job.id);
-    if (!current || current.attemptId !== attemptId || runningPorts.get(job.id) !== port || !["downloading", "merging"].includes(current.status)) return;
+    if (!current || current.attemptId !== attemptId || runningPorts.get(job.id) !== port || !["downloading", "merging", "recovering", "verifying"].includes(current.status)) return;
     runningPorts.delete(job.id);
     updateJob(job.id, {
       status: "failed",
@@ -2525,10 +2559,19 @@ async function startNativeJob(job, settings) {
       updateJob(job.id, { outputPath: message.outputPath || current.outputPath,
         status: message.type === "finalizing" ? "merging" : "downloading", message: message.message });
     }
+    if (message.type === "job_busy") {
+      runningPorts.delete(job.id); safeDisconnect(port);
+      Object.assign(job, { reconciling: true, status: "recovering", message: "本地已有同一任务，正在同步状态…" });
+      void reconcileNativeJob(job); return;
+    }
     if (message.type === "progress") {
       const currentStatus = current.status;
       const patch = {
-        status: message.stage === "merging" || currentStatus === "merging" ? "merging" : "downloading",
+        status: message.stage === "verifying" ? "verifying" : message.stage === "merging" ? "merging"
+          : ["recovering", "diagnosing", "resuming", "interrupted"].includes(message.stage) ? "recovering" : "downloading",
+        phase: message.stage || "downloading", canResume: message.canResume === true,
+        fragmentsDone: message.fragmentsDone ?? current.fragmentsDone, fragmentsTotal: message.fragmentsTotal ?? current.fragmentsTotal,
+        downloadedBytes: message.downloadedBytes ?? current.downloadedBytes, byteTotalEstimated: message.byteTotalEstimated === true,
         message: message.message || "Downloading...",
         percent: message.percent ?? jobs.get(job.id)?.percent ?? "",
         speed: message.speed ?? jobs.get(job.id)?.speed ?? "",
@@ -2558,7 +2601,7 @@ async function startNativeJob(job, settings) {
         warnings: Array.isArray(message.warnings) ? message.warnings.slice(0, 10) : [],
         error: "",
         details: "",
-        validationPending: false,
+        validationPending: false, canResume: false, phase: "completed", integrityVerified: message.integrityVerified === true,
         percent: "100",
         speed: "",
         eta: ""
@@ -2571,16 +2614,21 @@ async function startNativeJob(job, settings) {
 
     if (message.type === "refresh_required") {
       logJobFlow(current, "native result", { type: message.type, status: message.status });
-      updateJob(job.id, { exitCode: message.exitCode ?? null, details: message.details || "" });
+      updateJob(job.id, { exitCode: message.exitCode ?? null, details: message.details || "", canResume: message.canResume === true,
+        httpStatus: message.status, errorCode: message.errorCode, fragmentsDone: message.fragmentsDone, fragmentsTotal: message.fragmentsTotal });
       try { await requestJobRefresh(current, message.status); }
       catch (error) { await failRefreshJob(current, error.message); }
       return;
     }
 
-    if (["error", "failed", "incomplete"].includes(message.type)) {
+    if (["error", "failed", "incomplete", "attention", "cancelled"].includes(message.type)) {
       logJobFlow(current, "native result", { type: "error" });
       updateJob(job.id, {
-        status: message.type === "incomplete" ? "incomplete" : "failed",
+        status: ["incomplete", "attention", "cancelled"].includes(message.type) ? message.type : "failed",
+        canResume: message.canResume === true, phase: message.type,
+        httpStatus: message.httpStatus, errorCode: message.errorCode,
+        fragmentsDone: message.fragmentsDone ?? current.fragmentsDone, fragmentsTotal: message.fragmentsTotal ?? current.fragmentsTotal,
+        downloadedBytes: message.downloadedBytes ?? current.downloadedBytes,
         error: message.error || "Download failed.",
         details: message.details || message.error || "Download failed.",
         validationPending: Boolean(message.validationPending),
@@ -2622,6 +2670,7 @@ async function startNativeJob(job, settings) {
   try {
     await persistDownloadJobs();
     if (job.attemptId !== attemptId || TERMINAL_JOB_STATUSES.has(job.status)) { safeDisconnect(port); return; }
+    logJobFlow(job, "NATIVE_DISPATCHED", { attemptId });
     port.postMessage(nativePayload);
   } catch (error) {
     clearStartTimer();
@@ -2656,20 +2705,24 @@ function readableNativeDisconnectError(rawMessage) {
   return value || "本地助手在下载完成前断开，任务已停止。";
 }
 
-function cancelJob(jobId) {
+async function cancelJob(jobId, keepData = true) {
   const job = jobs.get(jobId);
   if (!job) return;
   if (job.browserDownload && Number.isInteger(job.browserDownloadId)) {
     void chrome.downloads.cancel(job.browserDownloadId).catch(() => {});
+  }
+  if (!job.browserDownload) {
+    try { await nativeControl(jobId, "cancel", { keepData, attemptId: job.attemptId }); } catch { /* Closing the owned port still stops its process. */ }
   }
   const port = runningPorts.get(jobId);
   if (port) {
     runningPorts.delete(jobId);
     safeDisconnect(port);
   }
+  if (TERMINAL_JOB_STATUSES.has(job.status) && job.status !== "completed") job.status = "paused";
   updateJob(jobId, {
-    status: "cancelled",
-    message: "已取消。",
+    status: "cancelled", canResume: keepData && job.canResume === true, fragmentsDone: keepData ? job.fragmentsDone : 0, downloadedBytes: keepData ? job.downloadedBytes : 0,
+    message: keepData ? "已取消；有效恢复数据已保留。" : "已取消并清理此任务的恢复数据。",
     error: "",
     details: ""
   });
@@ -2733,7 +2786,7 @@ function publicJob(job) {
     rejectedUrls,
     ...visible
   } = job;
-  return visible;
+  return { ...visible, kind: payload?.kind || "" };
 }
 
 function safeDisconnect(port) {
@@ -2750,7 +2803,7 @@ async function loadSettings() {
     ...DEFAULT_SETTINGS,
     ...stored,
     maxConcurrent: Math.max(1, Math.min(6, Number(stored.maxConcurrent || DEFAULT_SETTINGS.maxConcurrent) || 2)),
-    autoCookies: stored.autoCookies !== false,
+    autoCookies: stored.autoCookies === true,
     skipDownloaded: stored.skipDownloaded !== false,
     onlyMp4: stored.onlyMp4 !== false,
     showAdvanced: stored.showAdvanced === true
@@ -2762,7 +2815,7 @@ async function saveSettings(nextSettings) {
     ...DEFAULT_SETTINGS,
     ...nextSettings,
     maxConcurrent: Math.max(1, Math.min(6, Number(nextSettings.maxConcurrent || DEFAULT_SETTINGS.maxConcurrent) || 2)),
-    autoCookies: nextSettings.autoCookies !== false,
+    autoCookies: nextSettings.autoCookies === true,
     skipDownloaded: nextSettings.skipDownloaded !== false,
     onlyMp4: nextSettings.onlyMp4 !== false,
     showAdvanced: nextSettings.showAdvanced === true
@@ -3892,7 +3945,14 @@ function fullMediaReferer(headers) {
 
 function rememberHeaders(tabId, url, headers) {
   const state = ensureTabState(tabId);
-  state.headersByUrl.set(headerKey(url), headers);
+  const retained = { ...headers };
+  // An extensionless request may later prove to be media. Until then, retain
+  // only noncredential request context, never unrelated page/API cookies.
+  if (!isStreamUrl(url) && !state.streams.has(streamKey(url))) {
+    delete retained.cookie;
+    delete retained.authorization;
+  }
+  state.headersByUrl.set(headerKey(url), retained);
   while (state.headersByUrl.size > MAX_HEADERS_PER_TAB) {
     const firstKey = state.headersByUrl.keys().next().value;
     state.headersByUrl.delete(firstKey);
@@ -4386,7 +4446,7 @@ function hasNativeMode() {
 }
 
 function browserFilename(title, kind) {
-  let name = String(title || "video").normalize("NFC").replace(/[\x00-\x1f\x7f<>:"/\\|?*]/g, " ")
+  let name = String(title || "video").normalize("NFC").replace(/[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f<>:"/\\|?*]/g, " ")
     .replace(/\s+/g, " ").trim().replace(/^[. ]+|[. ]+$/g, "").replace(/\.(?:mp4|webm)$/i, "");
   name = Array.from(name).slice(0, 60).join("") || "video";
   if (/^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(name)) name = "video-" + name;
@@ -4459,4 +4519,33 @@ function redactDiagnostics(value, key = "") {
   }).replace(/(?:\/Users\/|\/home\/)[^\s"']+/g, "[local-path-redacted]")
     .replace(/(?:Bearer|Basic)\s+[^\s]+/gi, "[credential-redacted]")
     .replace(/(?:cookie|authorization|token|api[_-]?key|secret|password)\s*[:=]\s*[^\r\n,;]+/gi, "[credential-redacted]");
+}
+
+
+function nativeControl(jobId, action, fields = {}) {
+  return new Promise((resolve, reject) => {
+    let port, timer, done = false;
+    const finish = (error, value) => { if (done) return; done = true; clearTimeout(timer);
+      if (port) safeDisconnect(port); error ? reject(error) : resolve(value); };
+    try {
+      port = chrome.runtime.connectNative(HOST_NAME);
+      port.onMessage.addListener(message => { if (message.jobId === jobId) finish(null, message); });
+      port.onDisconnect.addListener(() => finish(new Error("本地控制连接中断。")));
+      timer = setTimeout(() => finish(new Error("本地控制请求超时。")), 5000); timer.unref?.();
+      port.postMessage({ action, jobId, ...fields });
+    } catch (error) { finish(error); }
+  });
+}
+
+async function resumeWithCurrent(jobId) {
+  await jobsReady;
+  const job = jobs.get(jobId);
+  if (!job || !isHlsKind(job.payload.kind) || job.browserDownload) throw new Error("该任务不支持 HLS 资源刷新。");
+  if (!["attention", "incomplete", "failed"].includes(job.status)) throw new Error("请先等待当前任务停止。");
+  await reconcileNativeJob(job);
+  if (job.status === "completed" || job.reconciling) return;
+  const tab = await chrome.tabs.get(job.payload.tabId);
+  if (!samePageIdentity(tab.url, job.payload.pageUrl)) throw new Error("请先回到原视频页面并播放，再恢复任务。");
+  Object.assign(job, { status: "recovering", flowState: "", retryCount: 0, refreshDeadline: 0, rejectedUrls: [] });
+  await requestJobRefresh(job, job.httpStatus || 403);
 }

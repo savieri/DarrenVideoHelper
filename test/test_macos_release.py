@@ -15,7 +15,7 @@ class MacOSReleaseTests(unittest.TestCase):
         self.assertIn('HOST_VERSION = "'+m['version_name']+'"',(ROOT/'native/host.py').read_text())
     def test_release_has_no_unreviewed_native_runtime(self):
         files={p.relative_to(ROOT/'native').as_posix() for p in (ROOT/'native').rglob('*') if p.is_file() and '__pycache__' not in p.parts}
-        self.assertEqual(files,{'host.py','bin/README.md'})
+        self.assertEqual(files,{'host.py','hls_engine.py','requirements.txt','bin/README.md'})
     def test_documentation_distinguishes_external_dependencies_and_modes(self):
         for name in ['README.md','README.zh-CN.md']:
             s=(ROOT/name).read_text()

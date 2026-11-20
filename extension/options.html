@@ -39,8 +39,10 @@
         <input id="maxConcurrent" type="number" min="1" max="6" step="1">
       </label>
 
+      <label><span>完整版网络重试上限（0–8）</span><input id="networkRetries" type="number" min="0" max="8" step="1"></label>
+      <label><span>完整版单次网络超时（2–60 秒）</span><input id="networkTimeout" type="number" min="2" max="60" step="1"></label>
       <section class="checks">
-        <label><input id="autoCookies" type="checkbox"> 页面解析时尝试读取 Chrome Cookie</label>
+        <label><input id="autoCookies" type="checkbox"> 允许页面解析读取本机 Chrome Cookie（可选，默认关闭）</label>
         <label><input id="skipDownloaded" type="checkbox"> 下载前提示曾下载（可强制重下）</label>
         <label><input id="nativeDirect" type="checkbox"> Full：直接 MP4/WebM 使用 Native Host 下载（特殊请求头／转 MP4）</label>
         <label><input id="onlyMp4" type="checkbox"> Native Host 优先输出 MP4</label>

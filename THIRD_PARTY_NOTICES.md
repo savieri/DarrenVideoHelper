@@ -30,8 +30,8 @@ a blanket MIT license. See https://ffmpeg.org/legal.html and https://ffmpeg.org/
 | FFmpeg / ffprobe | https://ffmpeg.org/legal.html | User-installed; build license depends on configuration |
 | Homebrew | https://brew.sh | Optional dependency installation route, not bundled or installed automatically |
 
-The installer verifies that selected programs execute successfully before host
-registration. It does not download and execute arbitrary binaries, remove
+The installer creates a project-private venv and installs yt-dlp 2026.10.26 from PyPI using the exact wheel SHA-256 in native/requirements.txt (Python 3.11+). The wheel is not redistributed in these ZIPs; source and bundled-executable upstream terms remain distinct. The installer verifies selected programs before host
+registration. It does not download unverified binaries, remove
 quarantine, request administrator rights, or distribute private signing keys.
 The manifest key is public material used to derive the stable extension ID.
 Future self-contained Full packages must record exact sources/builds, platform

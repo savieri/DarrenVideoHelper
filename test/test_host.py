@@ -64,9 +64,9 @@ class NativeHostTests(unittest.TestCase):
                 "video.mp4",
             )
 
-        self.assertIn("--continue", command)
+        self.assertIn("--no-continue", command)
         self.assertIn("--fragment-retries", command)
-        self.assertIn("8", command)
+        self.assertIn("4", command)
         self.assertIn("--socket-timeout", command)
         referer_index = command.index("--referer")
         self.assertEqual(command[referer_index + 1], "https://site.test/request-context")
@@ -166,7 +166,7 @@ class NativeHostTests(unittest.TestCase):
                 mock.patch.object(HOST, "cleanup_sidecars"),
                 mock.patch.object(HOST, "complete"),
             ):
-                HOST.run_download(message)
+                HOST.legacy_download(message)
 
             self.assertEqual(page_runner.call_args.args[2], message["pageUrl"])
 
@@ -207,7 +207,7 @@ class NativeHostTests(unittest.TestCase):
             self.assertEqual(probe["duration"], 5)
             self.assertTrue(output.exists())
 
-    def test_nonzero_ytdlp_exit_completes_when_mp4_passes_ffprobe(self):
+    def test_nonzero_ytdlp_exit_never_completes_even_when_mp4_is_probeable(self):
         class FakeProcess:
             pid = 1234
             stdout = iter(["ERROR: HTTP Error 403 after download\n"])
@@ -232,14 +232,9 @@ class NativeHostTests(unittest.TestCase):
                 mock.patch.object(HOST, "progress") as progress,
                 mock.patch.object(HOST.sys, "stderr"),
             ):
-                result, log, _started_at = HOST.run_ytdlp_attempt(
-                    "job", {}, "https://cdn.test/video.m3u8", output_dir, "video", "HLS"
-                )
-
-            self.assertEqual(result, output)
-            self.assertIn("403", log)
+                with self.assertRaisesRegex(HOST.OutputValidationError, "退出码为 1"):
+                    HOST.run_ytdlp_attempt("job", {}, "https://cdn.test/video.m3u8", output_dir, "video", "HLS")
             self.assertTrue(output.exists())
-            self.assertTrue(any(call.kwargs.get("percent") == "100" for call in progress.call_args_list))
 
     def test_complete_prevents_late_native_error_for_same_job(self):
         output = Path("/tmp/verified-video.mp4")
@@ -286,7 +281,7 @@ class NativeHostTests(unittest.TestCase):
                 mock.patch.object(HOST, "progress"),
                 mock.patch.object(HOST.sys, "stderr"),
             ):
-                with self.assertRaisesRegex(HOST.OutputValidationError, "校验未通过"):
+                with self.assertRaisesRegex(HOST.OutputValidationError, "退出码为 1"):
                     HOST.run_ytdlp_attempt("job", {}, "https://cdn.test/video.m3u8", output_dir, "video", "HLS")
             self.assertTrue(output.exists())
 
@@ -344,7 +339,7 @@ class NativeHostTests(unittest.TestCase):
                 mock.patch.object(HOST, "run_ytdlp_with_retries", side_effect=fail_attempt),
             ):
                 with self.assertRaises(RuntimeError):
-                    HOST.run_download(message)
+                    HOST.legacy_download(message)
 
         self.assertEqual(targets, ["https://cdn.test/video.m3u8"])
 
@@ -366,6 +361,50 @@ class NativeHostTests(unittest.TestCase):
         self.assertEqual(started_at, 10.0)
         self.assertEqual(runner.call_count, 2)
 
+
+
+class NativeInputValidationTests(unittest.TestCase):
+    def test_untrusted_native_commands_and_header_injection_are_rejected(self):
+        for message in [[],{'action':'shell','jobId':'job:x'},
+            {'action':'download','jobId':'../../outside','url':'https://example.test/a'},
+            {'action':'download','jobId':'job:x','url':'https://example.test/a','headers':{'cookie':'x\r\nInjected: yes'}}]:
+            with self.assertRaises(RuntimeError):HOST.validate_native_message(message)
+    def test_large_native_frame_is_rejected_before_payload_read(self):
+        import io,struct
+        fake=type('Input',(),{'buffer':io.BytesIO(struct.pack('<I',2*1024*1024))})()
+        with mock.patch.object(HOST.sys,'stdin',fake):
+            with self.assertRaisesRegex(RuntimeError,'too large'):HOST.read_message()
+
+class NativeCleanupTests(unittest.TestCase):
+    def test_inactive_cleanup_preserves_unrelated_files(self):
+        import hashlib,json
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);job='job:cleanup';work=root/'.darren-video-helper'/hashlib.sha256(job.encode()).hexdigest()[:32];work.mkdir(parents=True)
+            (work/'checkpoint.json').write_text(json.dumps({'jobId':job,'completed':{'0:0':{}},'assets':{}}))
+            (work/'segment-0-0.bin').write_bytes(b'fixture');unrelated=root/'unrelated.part';unrelated.write_bytes(b'keep')
+            with mock.patch.object(HOST,'STATE_DIR',root/'state'):
+                HOST.write_state(job,{'status':'attention','engine':'checkpoint-hls','workDir':str(work),'canResume':True})
+                HOST.clear_inactive_data(job)
+                self.assertFalse((work/'segment-0-0.bin').exists());self.assertTrue(unrelated.exists())
+                self.assertFalse(HOST.read_state(job)['canResume'])
+
+
+class CancellationGenerationTests(unittest.TestCase):
+    def test_cancelled_generation_is_not_dispatched_after_a_late_start(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(HOST,'STATE_DIR',Path(directory)), mock.patch.object(HOST,'send_message') as sender, mock.patch.object(HOST,'guarded_download') as downloader:
+            job='job:cancelled-before-start';control=HOST.state_path(job).with_suffix('.control.json')
+            control.write_text('{"cancel":true,"keepData":true,"attemptId":"attempt-cancelled"}')
+            HOST.handle_message({'action':'download','jobId':job,'attemptId':'attempt-cancelled','url':'https://example.test/video.mp4'})
+            downloader.assert_not_called();self.assertEqual(sender.call_args.args[0]['type'],'cancelled')
+
+
+class LegacyResumeTruthTests(unittest.TestCase):
+    def test_legacy_task_without_verified_checkpoint_is_not_called_resumable(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(HOST,'STATE_DIR',Path(directory)/'state'), mock.patch.object(HOST,'send_message') as sender, mock.patch.object(HOST,'HlsEngine') as engine:
+            job='job:legacy-proof';HOST.write_state(job,{'status':'incomplete','outputPath':str(Path(directory)/'missing.mp4'),'exitCode':1})
+            HOST.run_download({'jobId':job,'kind':'hls_media','url':'https://example.test/a.m3u8','settings':{'outputDir':directory}})
+            engine.assert_not_called();self.assertFalse(sender.call_args.args[0]['canResume'])
+            self.assertEqual(sender.call_args.args[0]['errorCode'],'LEGACY_CHECKPOINT_MISSING')
 
 if __name__ == "__main__":
     unittest.main()

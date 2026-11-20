@@ -718,3 +718,11 @@ footer button {
 .jobs {
   position: relative;
 }
+
+/* Stability states must remain readable with long titles. */
+.job-top { align-items: flex-start; gap: 10px; }
+.job-top strong { flex: 0 0 auto; max-width: 155px; white-space: normal; word-break: normal; }
+.job-top > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.job.attention, .job.recovering { border-color: #be8b28; }
+.job.attention .job-top strong, .job.recovering .job-top strong { color: #e9b648; }
+.job.verifying .job-top strong { color: var(--blue); }

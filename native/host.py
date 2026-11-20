@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import hashlib
+import math
 import signal
 from contextlib import contextmanager
 import json
@@ -14,11 +15,12 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl
 
-HOST_VERSION = "1.2.1-beta.16"
+HOST_VERSION = "1.2.1-beta.17"
 DEFAULT_OUTPUT_DIR = Path.home() / "Downloads" / "video_downloads"
 LOG_PATH = Path(os.environ.get("VIDEO_HELPER_LOG_PATH") or Path.home() / "Library/Logs/DarrenVideoHelper/native-host.log")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
@@ -40,6 +42,9 @@ DOWNLOAD_IDLE_TIMEOUT = 90
 NATIVE_INPUT = None
 STATE_DIR = Path(os.environ.get("VIDEO_HELPER_STATE_DIR") or Path.home() / "Library/Application Support/DarrenVideoHelper/jobs")
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hls_engine import Engine as HlsEngine, HlsError, Cancelled as HlsCancelled, safe_directory, safe_title, sha_file, atomic_json, remote_url
 
 class OutputValidationError(RuntimeError):
     pass
@@ -137,7 +142,7 @@ def incomplete(job_id, message, details=""):
         return
     emit_event({"type": "incomplete", "event": "incomplete", "jobId": job_id,
                 "message": message, "error": message, "details": diagnostic_details(details or message),
-                "retryable": True, "validationPending": bool(read_state(job_id).get("validationPending"))})
+                "retryable": True, "canResume": False, "validationPending": bool(read_state(job_id).get("validationPending"))})
     TERMINAL_JOB_TYPES[job_id] = "incomplete"
 
 
@@ -243,12 +248,14 @@ def read_message():
     if len(raw_length) != 4:
         raise RuntimeError("Invalid native messaging frame.")
     message_length = struct.unpack("<I", raw_length)[0]
-    if message_length <= 0 or message_length > 64 * 1024 * 1024:
+    if message_length <= 0 or message_length > 1024 * 1024:
         raise RuntimeError("Native message is too large.")
     data = sys.stdin.buffer.read(message_length)
     if len(data) != message_length:
         raise RuntimeError("Incomplete native message.")
-    return json.loads(data.decode("utf-8"))
+    message = json.loads(data.decode("utf-8"))
+    if not isinstance(message, dict): raise RuntimeError("Native message must be an object")
+    return message
 
 
 def send_message(payload):
@@ -320,6 +327,8 @@ def progress(job_id, message, percent=None, speed="", eta="", line="", stage="do
 
 
 def complete(job_id, output_path, probe, notify=True):
+    if JOB_CONTEXT.get(job_id, {}).get("publishRoot"):
+        output_path = publish_legacy_output(job_id, output_path, probe)
     if job_id in TERMINAL_JOB_TYPES:
         LOGGER.info(
             "job=%s ignored duplicate complete after terminal=%s",
@@ -342,6 +351,11 @@ def complete(job_id, output_path, probe, notify=True):
         "hasAudio": probe.get("hasAudio", False),
         "videoCodec": probe.get("videoCodec", ""),
         "audioCodec": probe.get("audioCodec", ""),
+        "fragmentsDone": probe.get("fragmentsDone", 0),
+        "fragmentsTotal": probe.get("fragmentsTotal", 0),
+        "integrityVerified": True,
+        "canResume": False,
+        "phase": "completed",
         "warningCount": probe.get("warningCount", 0),
         "warnings": probe.get("warnings", []),
         "unverifiedOutput": False,
@@ -398,7 +412,10 @@ def validate_url(url):
 def tool_path(name):
     if name in TOOL_CACHE:
         return TOOL_CACHE[name]
-    candidates = list(bundled_tool_candidates(name))
+    candidates = []
+    if name == "yt-dlp" and os.environ.get("VIDEO_HELPER_YTDLP_PATH"):
+        candidates.append(Path(os.environ["VIDEO_HELPER_YTDLP_PATH"]))
+    candidates += list(bundled_tool_candidates(name))
     found = shutil.which(name)
     if found:
         candidates.append(Path(found))
@@ -442,7 +459,7 @@ def build_ytdlp_command(message, target_url, output_dir, output_name):
     headers = message.get("headers") or {}
     settings = message.get("settings") or {}
     direct_media = message.get("kind") in ("hls_master", "hls_media", "mp4", "webm")
-    auto_cookies = settings.get("autoCookies", True) and not direct_media and not headers.get("cookie")
+    auto_cookies = settings.get("autoCookies", False) is True and not direct_media and not headers.get("cookie")
     selected_quality = message.get("qualityPreference") or settings.get("defaultQuality") or "best"
     selector = quality_selector(selected_quality)
     if message.get("renditionUrl"):
@@ -458,7 +475,7 @@ def build_ytdlp_command(message, target_url, output_dir, output_name):
         "--ffmpeg-location",
         tool_path("ffmpeg"),
         "--no-playlist",
-        "--continue",
+        "--no-continue",
         "--retries",
         "5",
         "--fragment-retries",
@@ -492,10 +509,13 @@ def build_ytdlp_command(message, target_url, output_dir, output_name):
         output_name.replace("%", "%%"),
     ]
 
-    if message.get("kind") in ("hls_master", "hls_media"):
-        command[command.index("--retries") + 1] = "0"
-        command[command.index("--fragment-retries") + 1] = "2"
-        command.append("--abort-on-unavailable-fragments")
+    command.append("--abort-on-unavailable-fragments")
+    settings = message.get("settings") or {}
+    retries = max(0, min(8, int(settings.get("networkRetries", 4))))
+    timeout = max(2, min(60, int(settings.get("networkTimeout", 20))))
+    command[command.index("--retries") + 1] = str(retries)
+    command[command.index("--fragment-retries") + 1] = str(retries)
+    command[command.index("--socket-timeout") + 1] = str(timeout)
     if auto_cookies:
         command.extend(["--cookies-from-browser", "chrome"])
 
@@ -803,7 +823,7 @@ def validate_final_output(job_id, output_path, expected_duration=0, require_audi
     expected = float(expected_duration or 0)
     actual = float(probe.get("duration") or 0)
     warnings = []
-    if enforce_duration and expected > 0 and abs(actual - expected) > max(8, expected * 0.15):
+    if enforce_duration and expected > 0 and abs(actual - expected) > max(1, min(3, expected * 0.01)):
         write_state(job_id, {"unverifiedOutput": True, "validationPending": False})
         raise OutputValidationError(f"成品时长 {actual:.1f}s 与选定资源 {expected:.1f}s 不符，文件已保留。")
     if expected > 0 and abs(actual - expected) > max(5, expected * 0.08):
@@ -912,7 +932,8 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
     process = None
 
     return_code = None
-    pending = queue.Queue()
+    pending = queue.Queue(maxsize=512)
+    readers_stop = threading.Event()
     readers = []
     with job_log(job_id) as record:
         record("process_start", command=redacted_command(command), toolVersions=TOOL_VERSIONS)
@@ -927,14 +948,18 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
             )
             LOGGER.info("job=%s yt-dlp started pid=%s", job_id, process.pid)
 
+            def offer(item):
+                while not readers_stop.is_set():
+                    try: pending.put(item, timeout=0.1); return True
+                    except queue.Full: continue
+                return False
             def drain(source, pipe):
                 try:
                     for line in pipe:
-                        pending.put((source, line))
+                        if not offer((source,line)): break
                 finally:
-                    if hasattr(pipe, "close"):
-                        pipe.close()
-                    pending.put((source, None))
+                    if hasattr(pipe, "close"): pipe.close()
+                    offer((source,None))
 
             pipes = {"stdout": process.stdout, "stderr": getattr(process, "stderr", None)}
             active = {source for source, pipe in pipes.items() if pipe is not None}
@@ -991,10 +1016,12 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
             record("process_interrupted", reason=str(error))
             cleanup_sidecars(output_dir, [stem], started_at)
             if isinstance(error, NativePipeClosed):
-                write_state(job_id, {"status": "incomplete", "message": "下载中断；已清理分片，可重试。"})
+                write_state(job_id, {"status": "incomplete", "message": "下载连接中断，已保留临时数据；该旧引擎不能验证分片续传。"})
             raise
         finally:
-            # The child has exited. Preserve any last lines buffered during cancellation.
+            # The child has exited. Stop bounded reader queues before joining.
+            readers_stop.set()
+            # Preserve any last lines buffered during cancellation.
             for reader in readers:
                 reader.join(timeout=0.25)
             while not pending.empty():
@@ -1008,7 +1035,7 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
     combined_output = "".join(output_lines)
     output_path = exact_mp4_file(output_dir, stem, started_at)
     if output_path:
-        if return_code != 0 and message.get("exactSelection"):
+        if return_code != 0:
             write_state(job_id, {"unverifiedOutput": True, "validationPending": False})
             raise OutputValidationError(f"yt-dlp 退出码为 {return_code}，无法确认所选资源完整。文件已保留。")
         emit_event({"type": "finalizing", "event": "finalizing", "jobId": job_id,
@@ -1065,7 +1092,7 @@ def is_retryable_failure(output):
 def run_ytdlp_with_retries(job_id, message, target_url, output_dir, stem, label, attempts=2):
     combined = []
     earliest_started_at = time.time()
-    allow_cookie_fallback = (message.get("settings") or {}).get("autoCookies", True) and message.get("kind") not in ("hls_master", "hls_media", "mp4", "webm")
+    allow_cookie_fallback = (message.get("settings") or {}).get("autoCookies", False) is True and message.get("kind") not in ("hls_master", "hls_media", "mp4", "webm")
     for attempt in range(1, max(1, attempts) + 1):
         attempt_label = label if attempts == 1 else f"{label}（尝试 {attempt}/{attempts}）"
         output_path, output, started_at = run_ytdlp_attempt(
@@ -1196,7 +1223,7 @@ def run_bilibili_dash_attempt(job_id, message, output_dir, stem):
     return None, "\n".join(outputs), started_at
 
 
-def run_download(message):
+def legacy_download(message):
     job_id = message.get("jobId") or "job"
     settings = message.get("settings") or {}
     output_dir = Path(os.path.expanduser(settings.get("outputDir") or message.get("outputDir") or DEFAULT_OUTPUT_DIR))
@@ -1284,13 +1311,13 @@ def run_download(message):
         )
 
     if not output_path and message.get("exactSelection") and kind in ("hls_master", "hls_media") and expired_media_status(first_output):
-        cleanup_sidecars(output_dir, [stem], first_started_at, discard_resume=True)
+        cleanup_sidecars(output_dir, [stem], first_started_at)
         incomplete(job_id, classify_failure(first_output) + " 请刷新检测后重新选择该资源。", first_output[-8000:])
         return
 
     if not output_path and kind in ("hls_master", "hls_media") and expired_media_status(first_output):
         status = expired_media_status(first_output)
-        cleanup_sidecars(output_dir, [stem], first_started_at, discard_resume=True)
+        cleanup_sidecars(output_dir, [stem], first_started_at)
         LOGGER.warning("job=%s media_url_expired status=%s detectedAt=%s downloadStartedAt=%s context=%s refreshAttempt=%s",
                        job_id, status, message.get("detectedAt"), message.get("downloadStartedAt"),
                        json.dumps(media_url_diagnostics(first_target)), message.get("refreshAttempt", 0))
@@ -1335,7 +1362,7 @@ def run_download(message):
         temp = job_temp_dir(output_dir, stem)
         if any(resume_sidecar(p.name[len(stem):]) for p in matching_files(output_dir, [stem], 0)
                + (matching_files(temp, [stem], 0) if temp.is_dir() else [])):
-            incomplete(job_id, "未完成，可重试/续传。" + classify_failure(first_output), first_output[-8000:])
+            incomplete(job_id, "下载未完成，临时数据已保留；可重新尝试。" + classify_failure(first_output), first_output[-8000:])
             return
         raise RuntimeError(classify_failure(first_output) + "\n\n" + first_output[-8000:])
 
@@ -1384,6 +1411,12 @@ def guarded_download(message):
         else:
             fail(job_id, f"内置下载工具缺失：{missing}", details=missing)
         return True
+    except OSError as error:
+        text="磁盘空间不足，任务已停止，临时数据已保留。" if error.errno in (28,122) else "输出文件不可写或媒体工具无法运行，请检查目录及依赖。"
+        saved=read_state(job_id);summary=checkpoint_summary(saved.get("workDir") or "") if saved.get("engine")=="checkpoint-hls" else {"canResume":False}
+        write_state(job_id,{"status":"failed","errorCode":"DISK_FULL" if error.errno in (28,122) else "FILE_IO",**summary})
+        fail(job_id,text,details=text)
+        return True
     except Exception as error:
         message_text = str(error)
         LOGGER.exception("job=%s failed: %s", job_id, message_text.split("\n", 1)[0])
@@ -1396,6 +1429,7 @@ def guarded_download(message):
 
 
 def handle_message(message):
+    validate_native_message(message)
     job_id = message.get("jobId") or "job"
     action = message.get("action")
     LOGGER.info("received action=%s job=%s", action or "", job_id)
@@ -1413,6 +1447,24 @@ def handle_message(message):
             page = diagnostic_page(job_id, max(0, int(message.get("offset") or 0)))
             send_message({"type": "job_diagnostics", "jobId": job_id, **page})
             return True
+        if action == "open":
+            saved=read_state(job_id);target=Path(saved.get("outputPath") or "")
+            if sys.platform!="darwin" or saved.get("status")!="completed" or not target.is_file() or target.is_symlink():
+                raise RuntimeError("Only verified completed macOS outputs can be opened")
+            subprocess.run(["/usr/bin/open","-R",str(target)],check=True,timeout=10)
+            send_message({"type":"open_ack","jobId":job_id})
+            return True
+        if action == "cancel":
+            control = state_path(job_id).with_suffix(".control.json")
+            STATE_DIR.mkdir(parents=True,exist_ok=True,mode=0o700)
+            keep_data = message.get("keepData") is not False
+            atomic_json(control,{"cancel": True, "keepData": keep_data, "attemptId": message.get("attemptId")})
+            if not keep_data:
+                try:
+                    with job_lock(job_id): clear_inactive_data(job_id)
+                except JobBusy: pass  # The active engine consumes the same cancellation marker.
+            send_message({"type": "cancel_ack", "jobId": job_id})
+            return True
         if action == "status":
             saved = read_state(job_id)
             active = False
@@ -1420,14 +1472,13 @@ def handle_message(message):
                 with job_lock(job_id):
                     saved = read_state(job_id)
                     # Query never removes media or starts a downloader.
-                    if saved and saved.get("status") != "completed":
+                    if saved.get("engine") == "checkpoint-hls":
+                        saved = inspect_hls_state(job_id, saved)
+                    elif saved and saved.get("status") != "completed":
                         path = Path(saved.get("outputPath") or "")
                         can_verify = not (saved.get("unverifiedOutput") or saved.get("validationPending")
                                           or legacy_decode_timeout(saved.get("error") or ""))
-                        successful_exit = (
-                            not saved.get("verifyDecode") or "exitCode" not in saved or saved.get("exitCode") == 0
-                            or saved.get("status") == "finalizing" and saved.get("exitCode") is None
-                        )
+                        successful_exit = saved.get("exitCode") == 0
                         if can_verify and successful_exit and (path.is_file() or saved.get("status") not in ("failed", "incomplete")):
                             try:
                                 _, probe = validate_final_output(job_id, path, saved.get("expectedDuration"),
@@ -1444,12 +1495,20 @@ def handle_message(message):
         if action != "download":
             raise RuntimeError("Unknown native host action.")
         with job_lock(job_id):
+            control = state_path(job_id).with_suffix(".control.json")
+            if control.exists():
+                try: pending_control=json.loads(control.read_text())
+                except ValueError: pending_control={}
+                if pending_control.get("attemptId") and pending_control.get("attemptId")==message.get("attemptId"):
+                    send_message({"type":"cancelled","jobId":job_id,"attemptId":message.get("attemptId"),"canResume":False,"message":"此派发已被用户取消，未启动下载。"})
+                    return True
+                control.unlink()
             JOB_CONTEXT[job_id] = {"attemptId": message.get("attemptId") or str(time.time_ns())}
             write_state(job_id, {"currentAttemptId": JOB_CONTEXT[job_id]["attemptId"]})
             TERMINAL_JOB_TYPES.pop(job_id, None)
             return guarded_download(message)
     except JobBusy as error:
-        send_message({"type": "incomplete", "jobId": job_id, "message": str(error), "active": True})
+        send_message({"type": "job_busy", "jobId": job_id, "message": str(error), "active": True})
         return True
     except NativePipeClosed:
         return False
@@ -1460,6 +1519,9 @@ def handle_message(message):
 
 def main():
     global NATIVE_INPUT
+    for origin in sys.argv[1:]:
+        if origin.startswith("chrome-extension://") and origin != "chrome-extension://mabnjnddplpelefjgohbjcoajnimpgna/":
+            raise RuntimeError("Unexpected extension origin")
     setup_logging()
     def interrupted(_signum, _frame):
         raise NativePipeClosed("Native host stopped")
@@ -1505,6 +1567,199 @@ def main():
         LOGGER.info("host exit reason=fatal-framing-error")
     finally:
         NATIVE_INPUT = None
+
+
+def validate_native_message(message):
+    if not isinstance(message, dict): raise RuntimeError("Native message must be an object")
+    action = message.get("action")
+    if action not in ("ping", "status", "diagnostics", "download", "cancel", "open"):
+        raise RuntimeError("Unknown native action")
+    job_id = message.get("jobId")
+    if action != "ping" and (not isinstance(job_id,str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}",job_id)):
+        raise RuntimeError("Invalid job ID")
+    if action == "download":
+        remote_url(message.get("url"))
+        for field in ("pageUrl","renditionUrl","renditionAudioUrl","renditionMasterUrl","masterUrl"):
+            if message.get(field): remote_url(message[field])
+        if not isinstance(message.get("settings",{}),dict) or not isinstance(message.get("headers",{}),dict):
+            raise RuntimeError("Invalid native download settings")
+        for container in ("headers","renditionMasterHeaders"):
+            headers=message.get(container) or {}
+            if not isinstance(headers,dict) or len(headers)>50:raise RuntimeError("Invalid request headers")
+            for key,value in headers.items():
+                if not isinstance(key,str) or not isinstance(value,str) or len(value)>16384 or re.search(r"[\r\n\x00]",key+value):
+                    raise RuntimeError("Invalid request header")
+        direct=message.get("directMedia") or {}
+        if not isinstance(direct,dict):raise RuntimeError("Invalid direct media")
+        for field in ("videoUrl","audioUrl"):
+            if direct.get(field):remote_url(direct[field])
+        for field in ("videoBackupUrls","audioBackupUrls"):
+            values=direct.get(field) or []
+            if not isinstance(values,list) or len(values)>30:raise RuntimeError("Invalid backup media")
+            for url in values:remote_url(url)
+        for key in ("expectedDuration","expectedHeight","selectedHeight"):
+            if key in message:
+                value=message[key]
+                if not isinstance(value,(int,float)) or not math.isfinite(value) or value<0 or value>604800:raise RuntimeError("Invalid media dimensions or duration")
+        for key in ("sourceTitle","pageTitle"):
+            if key in message and (not isinstance(message[key],str) or len(message[key])>2000): raise RuntimeError("Invalid title")
+
+
+def native_cancel_check(job_id):
+    control = state_path(job_id).with_suffix(".control.json")
+    if control.is_file() and not control.is_symlink():
+        try: saved=json.loads(control.read_text())
+        except ValueError: saved={}
+        if saved.get("cancel") and (not saved.get("attemptId") or saved.get("attemptId")==JOB_CONTEXT.get(job_id,{}).get("attemptId")): raise HlsCancelled(saved.get("keepData",True))
+    if os.name != "nt" and NATIVE_INPUT is not None:
+        try:
+            if select.select([NATIVE_INPUT],[],[],0)[0] and not NATIVE_INPUT.peek(1):raise HlsCancelled(True,True)
+        except (ValueError,OSError): raise HlsCancelled(True,True)
+
+
+def checkpoint_summary(root, verify=True):
+    try:
+        root=Path(root)
+        if root.is_symlink() or not root.is_dir(): return {"canResume":False}
+        path=root/"checkpoint.json"
+        if path.is_symlink() or path.stat().st_size>32*1024*1024:return {"canResume":False}
+        data=json.loads(path.read_text());entries=data.get("completed",{}).copy()
+        receipts=root/"receipts.jsonl"
+        if receipts.is_file() and not receipts.is_symlink():
+            for line in receipts.open():
+                try:
+                    receipt=json.loads(line);entries[receipt["key"]]=receipt["record"]
+                except (ValueError,KeyError,TypeError):continue
+        count=0;size=0
+        for key,record in entries.items():
+            if not re.fullmatch(r"\d+:\d+",key):continue
+            path=root/("segment-"+key.replace(":","-")+".bin")
+            if path.is_file() and not path.is_symlink() and path.stat().st_size==record.get("bytes"):
+                if not verify or sha_file(path)==record.get("sha256"):count+=1;size+=path.stat().st_size
+        return {"canResume":bool(count) and not data.get("resumeBlocked") and data.get("state")!="completed",
+                "fragmentsDone":count,"fragmentsTotal":sum(len(t["segments"]) for t in data.get("tracks",[])),
+                "downloadedBytes":size,"checkpointState":data.get("state"),"errorCode":data.get("lastError")}
+    except (OSError,ValueError,KeyError,TypeError):return {"canResume":False}
+
+
+def clear_inactive_data(job_id):
+    saved=read_state(job_id)
+    if saved.get("status")=="completed": return
+    work=Path(saved.get("workDir") or "")
+    token=hashlib.sha256(job_id.encode()).hexdigest()[:32]
+    if saved.get("engine")=="checkpoint-hls":
+        if work.name!=token or work.parent.name!=".darren-video-helper" or work.is_symlink(): return
+        safe_directory(work)
+        path=work/"checkpoint.json"
+        if path.is_symlink() or not path.is_file(): return
+        data=json.loads(path.read_text())
+        if data.get("jobId")!=job_id: return
+        for item in work.iterdir():
+            if item.name!="checkpoint.json" and item.is_file() and not item.is_symlink(): item.unlink()
+        data.update(completed={},assets={},muxReady=False,state="cancelled",canResume=False)
+        atomic_json(path,data)
+    elif saved.get("engine")=="legacy-isolated":
+        if work.parent.name!=token or work.parent.parent.name!=".darren-video-helper" or not re.fullmatch(r"legacy-[0-9a-f]{32}",work.name): return
+        safe_directory(work);shutil.rmtree(work)
+    write_state(job_id,{"status":"cancelled","canResume":False,"fragmentsDone":0,"downloadedBytes":0,"message":"本任务恢复数据已清理。"})
+
+
+def inspect_hls_state(job_id, saved):
+    if saved.get("status") == "completed": return saved
+    summary=checkpoint_summary(saved.get("workDir") or "",verify=True)
+    if saved.get("errorCode") in ("IDENTITY_CHANGED","CONTENT_CHANGED","PLAYLIST_CHANGED","CHECKPOINT_INVALID"):
+        summary["canResume"]=False
+    status=saved.get("status")
+    if status in ("downloading","recovering","verifying","merging","resuming","diagnosing"):
+        status="attention" if summary.get("canResume") else "incomplete"
+    return write_state(job_id,{**summary,"status":status or "incomplete","phase":status,
+        "message":saved.get("message") if saved.get("status") in ("failed","attention","completed","cancelled") else
+            ("连接已中断，已找到可验证分片；可验证后续传。" if summary.get("canResume") else "连接已中断，没有可验证的续传数据；可重试。")})
+
+
+def publish_legacy_output(job_id, candidate, probe):
+    context=JOB_CONTEXT[job_id];root=safe_directory(context["publishRoot"])
+    candidate=Path(candidate)
+    work=Path(context["workDir"])
+    if work not in candidate.parents or candidate.is_symlink(): raise OutputValidationError("Unexpected output location")
+    title=safe_title(context.get("sourceTitle"));digest=sha_file(candidate)
+    for n in range(1,10000):
+        final=root/(title+(f" ({n})" if n>1 else "")+".mp4")
+        write_state(job_id,{"publishingPath":str(final),"candidateSha256":digest})
+        try:os.link(candidate,final)
+        except FileExistsError:continue
+        candidate.unlink()
+        shutil.rmtree(work)
+        write_state(job_id,{"outputPath":str(final),"canResume":False,"integrityVerified":True})
+        context.pop("publishRoot",None)
+        return final
+    raise OutputValidationError("Too many filename conflicts")
+
+
+def run_download(message):
+    job_id=message['jobId'];settings=message.get('settings') or {}
+    configured=str(settings.get('outputDir') or DEFAULT_OUTPUT_DIR)
+    if '..' in Path(configured).parts or not Path(configured).expanduser().is_absolute(): raise RuntimeError('输出目录必须为绝对路径，且不能包含 ..')
+    output=safe_directory(Path(configured).expanduser())
+    if message.get('kind') in ('hls_master','hls_media'):
+        work=output/'.darren-video-helper'/hashlib.sha256(job_id.encode()).hexdigest()[:32]
+        prior=read_state(job_id)
+        if prior.get('outputPath') and prior.get('engine')!='checkpoint-hls' and not (work/'checkpoint.json').is_file() and prior.get('status')!='completed':
+            text='旧版任务没有可验证的分片检查点，不能承诺续传。旧文件已保留；请重新检测并从资源卡片创建新任务。'
+            write_state(job_id,{'status':'attention','canResume':False,'errorCode':'LEGACY_CHECKPOINT_MISSING','message':text})
+            emit_event({'type':'attention','jobId':job_id,'message':text,'error':text,'canResume':False,'errorCode':'LEGACY_CHECKPOINT_MISSING'})
+            return
+        write_state(job_id,{'engine':'checkpoint-hls','workDir':str(work),'status':'diagnosing','phase':'diagnosing','canResume':False})
+        emit_event({'type':'download_started','jobId':job_id,'message':'正在检查 HLS 清单与本地检查点…','canResume':False})
+        def notify(**fields):
+            stage=fields.pop('stage');text=fields.pop('message')
+            if stage in ('attention','failed'): return
+            with job_log(job_id) as record:
+                record('hls_progress',stage=stage,fragmentsDone=fields.get('fragmentsDone'),fragmentsTotal=fields.get('fragmentsTotal'),
+                       downloadedBytes=fields.get('downloadedBytes'),httpStatus=fields.get('httpStatus'))
+            status=stage if stage in ('downloading','recovering','diagnosing','resuming','verifying','attention','failed') else 'merging' if stage=='merging' else 'downloading'
+            write_state(job_id,{'status':status,'phase':stage,'message':text,**fields})
+            emit_event({'type':'progress','jobId':job_id,'stage':stage,'message':text,**fields})
+        engine=None
+        try:
+            engine=HlsEngine(message,output,tool_path,notify,lambda:native_cancel_check(job_id))
+            path,probe=engine.execute()
+            write_state(job_id,{'exitCode':0,'integrityVerified':True,'canResume':False,'phase':'completed'})
+            complete(job_id,path,probe)
+        except HlsCancelled as error:
+            summary=checkpoint_summary(work)
+            state='incomplete' if error.disconnected else 'cancelled'
+            write_state(job_id,{'status':state,'phase':state,'message':str(error),**summary})
+            if not error.disconnected:emit_event({'type':'cancelled','jobId':job_id,'message':str(error),**summary})
+            return
+        except HlsError as error:
+            summary=checkpoint_summary(work)
+            summary.update(errorCode=error.code,httpStatus=error.status)
+            if error.code in ('IDENTITY_CHANGED','CONTENT_CHANGED','PLAYLIST_CHANGED','CHECKPOINT_INVALID'):summary['canResume']=False
+            status='attention' if error.refresh else 'failed'
+            write_state(job_id,{'status':status,'phase':status,'error':str(error),'message':str(error),'exitCode':None,**summary})
+            if error.refresh and not message.get('refreshAttempt'):
+                send_message({'type':'refresh_required','jobId':job_id,'attemptId':JOB_CONTEXT[job_id]['attemptId'],
+                    'status':error.status,'message':str(error),'details':str(error),'errorCode':error.code,**summary})
+            else:
+                emit_event({'type':'attention' if error.refresh else 'failed','jobId':job_id,'message':str(error),
+                    'error':str(error),'errorCode':error.code,**summary})
+                TERMINAL_JOB_TYPES[job_id]='failed'
+        return
+    # Existing page/DASH/MP4 pipeline remains, isolated from final user-visible output.
+    saved=read_state(job_id)
+    if saved.get('status')=='completed' and saved.get('outputPath') and saved.get('candidateSha256'):
+        path=Path(saved['outputPath'])
+        if path.parent==output and path.is_file() and not path.is_symlink() and sha_file(path)==saved['candidateSha256']:
+            _,probe=validate_final_output(job_id,path,verify_decode=True);complete(job_id,path,probe);return
+        raise OutputValidationError('已完成文件已移除或改变，未自动覆盖。')
+    work=safe_directory(output/'.darren-video-helper'/hashlib.sha256(job_id.encode()).hexdigest()[:32]/('legacy-'+uuid.uuid4().hex))
+    JOB_CONTEXT[job_id].update(publishRoot=str(output),workDir=str(work),sourceTitle=message.get('sourceTitle') or message.get('pageTitle'))
+    # Legacy extraction cannot prove fragment identity across URL refresh; retry in a new attempt directory.
+    write_state(job_id,{'outputPath':'','engine':'legacy-isolated','workDir':str(work),'canResume':False})
+    isolated={**message,'settings':{**settings,'outputDir':str(work)},'enforceDuration':bool(message.get('expectedDuration'))}
+    legacy_download(isolated)
+
 
 
 if __name__ == "__main__":

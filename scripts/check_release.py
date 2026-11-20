@@ -11,8 +11,8 @@ ROOT=Path(__file__).resolve().parents[1]
 def check_extension(files, native):
     m=json.loads(files['manifest.json'])
     assert m['manifest_version']==3
-    assert m['version_name']=='1.2.1-beta.16'
-    assert m['version']=='1.2.1.16'
+    assert m['version_name']=='1.2.1-beta.17'
+    assert m['version']=='1.2.1.17'
     assert ('nativeMessaging' in m['permissions']) is native
     assert 'downloads' in m['permissions']
     h=hashlib.sha256(base64.b64decode(m['key'])).hexdigest()[:32]
@@ -43,7 +43,8 @@ def main():
             for path,data in source.items():
                 if path!='manifest.json': assert files[path]==data,path+' differs from checkout'
             if native:
-                assert z.read('native/host.py')==(ROOT/'native/host.py').read_bytes()
+                for path in ('native/host.py','native/hls_engine.py','native/requirements.txt'):
+                    assert z.read(path)==(ROOT/path).read_bytes(),path+' differs from checkout'
                 assert z.getinfo('install.command').external_attr>>16 & 0o111
             print(name+': structure, references, ID, source parity, and binary exclusions passed')
     print('All package checks passed')

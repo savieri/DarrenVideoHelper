@@ -1,4 +1,4 @@
-# Browser download decision — beta.16
+# Browser download decision — beta.17
 
 Chrome's Downloads API starts a direct HTTP(S) file transfer without local tools.
 Its persistent download ID is saved with the job, and onChanged plus popup polling
@@ -11,7 +11,7 @@ A standalone manifest omits nativeMessaging. Both editions share all JS/assets;
 Full requests nativeMessaging for existing complex download flows. A missing
 native capability produces an explicit Full-required message before enqueueing.
 Chrome owns temporary direct-download data. Native partial data is retained under
-the existing resumable-download policy; no sweeping deletion of Downloads occurs.
+the checkpointed VOD HLS policy (verified fragments only); no sweeping deletion of Downloads occurs.
 
 HLS-to-MP4 is not implemented in this browser release. MSE receives encoded media
 for playback; it is not a universal file muxer. An offscreen document can manage

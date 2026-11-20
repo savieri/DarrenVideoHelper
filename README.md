@@ -1,8 +1,8 @@
 # DarrenVideoHelper
 
-Detect video resources in the current tab and download direct MP4/WebM files in Chrome. The optional **macOS Full** edition keeps the beta.15 Native Messaging + yt-dlp + FFmpeg pipeline for HLS, DASH and supported site extractors.
+Detect video resources in the current tab and download direct MP4/WebM files in Chrome. The optional **macOS Full** edition keeps the beta.15 Native Messaging pipeline: checkpointed HLS + FFmpeg, with pinned yt-dlp for direct/native files, DASH and supported site extractors.
 
-[中文安装指南](README.zh-CN.md) · **v1.2.1-beta.16 — public prerelease**
+[中文安装指南](README.zh-CN.md) · **v1.2.1-beta.17 — public prerelease**
 
 ![Popup rendered from the actual extension HTML, CSS and JavaScript with sample test data](docs/images/popup.png)
 
@@ -10,9 +10,9 @@ Detect video resources in the current tab and download direct MP4/WebM files in 
 
 ## Download
 
-- **[Chrome Extension ZIP — start here](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.16/DarrenVideoHelper-Chrome-Extension.zip)**: no Python, Homebrew, yt-dlp or Terminal for direct MP4/WebM downloads.
-- **[macOS Full ZIP](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.16/DarrenVideoHelper-macOS-Full.zip)**: includes extension, Python host source and installer. **Requires locally installed Python 3.9+, yt-dlp, FFmpeg and ffprobe. These runtimes are not bundled.**
-- [Release notes and checksums](https://github.com/savieri/DarrenVideoHelper/releases/tag/v1.2.1-beta.16)
+- **[Chrome Extension ZIP — start here](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.17/DarrenVideoHelper-Chrome-Extension.zip)**: no Python, Homebrew, yt-dlp or Terminal for direct MP4/WebM downloads.
+- **[macOS Full ZIP](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.17/DarrenVideoHelper-macOS-Full.zip)**: includes extension, Python host source and installer. **Requires Python 3.11+, FFmpeg and ffprobe. The installer downloads hash-pinned yt-dlp 2026.10.26 into a private project runtime; Internet is required. Runtimes are not bundled.**
+- [Release notes and checksums](https://github.com/savieri/DarrenVideoHelper/releases/tag/v1.2.1-beta.17)
 
 ## Install the Chrome extension
 
@@ -33,10 +33,10 @@ Chrome requires these manual steps for an unpacked extension. This is not a Chro
 1. Download and unzip **DarrenVideoHelper-macOS-Full.zip**.
 2. Install the dependencies first. If you already use [Homebrew](https://brew.sh), run once:
    ```sh
-   brew install python yt-dlp ffmpeg
+   brew install python ffmpeg
    ```
    If you do not have Homebrew or want no Terminal setup, use the Chrome edition for direct files. **Full is not a zero-dependency package.**
-3. Double-click **install.command**. It checks the dependencies, runs the host self-test and registers the Native Host for your user account. It does not install Homebrew, remove quarantine or modify Chrome security settings.
+3. Double-click **install.command**. It checks Python/FFmpeg, creates a private venv with hash-pinned yt-dlp 2026.10.26, runs the host self-test and registers the Native Host for your user account. It does not install Homebrew, alter global yt-dlp, remove quarantine or modify Chrome security settings.
 4. In `chrome://extensions`, enable Developer mode, click **Load unpacked** and select the included **extension/** folder.
 5. Play a video and open the popup. Direct files use Chrome by default; HLS/DASH/site extraction uses the installed host. For a direct file needing captured request headers or MP4 conversion, enable **Full: direct MP4/WebM via Native Host** in Options and select/download the resource again. Retrying an old job keeps its original engine.
 
@@ -53,10 +53,30 @@ Keep the extension folder. The installer copies the host source into your Applic
 | HLS → MP4 / separate DASH audio + video | Requires Full | Native pipeline, site dependent |
 | YouTube / Bilibili page extraction | Requires Full | Existing pipeline retained; site dependent |
 | Progress, completion, failure, queue, redacted diagnostics | Included | Included |
-| Additional software | None for direct downloads | Python 3.9+, yt-dlp, FFmpeg/ffprobe |
+| Additional software | None for direct downloads | Python 3.11+, FFmpeg/ffprobe; installer provisions pinned yt-dlp |
 | Operating systems | Validated here on macOS source/tests; Windows/Linux untested | Apple Silicon macOS checked; Intel macOS untested |
 
 Chrome 119+ / Manifest V3 is required. **Windows and Linux are not claimed as tested or supported releases.** Legacy Windows build files remain in Git history/source for reference and are excluded from release packages.
+
+## HLS recovery in beta.17
+
+Full now uses a checkpointed VOD engine for TS/fMP4, initialization maps, byte ranges,
+normal authorized AES-128 and the default separate audio track. It handles bounded
+HTTP recovery, persistent Retry-After, authorization/manifest revalidation and safe
+resumption. It verifies all cached chunks, compares playlist identity/sequence,
+and rechecks remote samples before reuse. Changed content is not blindly appended.
+Downloading 100% is followed by merging and verification; only a verified file is
+atomically published. Unsupported live/delta/DRM and incompatible timestamps stop
+with data preserved. Other audio tracks/subtitles are not exported.
+
+When a task requires attention, normally play/authorize the original page, then
+choose **重新检测并恢复**. **验证后续传** appears only for verified retained data.
+Retry starts a new attempt; Cancel offers retention, and **清理恢复数据** affects
+only that job. A server that keeps refusing access remains an error.
+
+**100 regression tests passed**, plus real Native process-kill recovery and a
+2482-segment / 2.2 GiB generated-media stress test. [Detailed repair report](docs/REPAIR_REPORT_beta17.md)
+· [Validation and limitations](VALIDATION.md). Original-site 403 resolution is not claimed.
 
 ## Limits
 
@@ -64,7 +84,7 @@ Chrome 119+ / Manifest V3 is required. **Windows and Linux are not claimed as te
 - Direct downloads do not transcode, add missing audio, or override server authentication, request-header, download or DRM restrictions. Some signed/CDN links can fail; use a fresh resource or Full when needed. A Chrome `complete` result confirms file transfer, not ffprobe validation.
 - Resource sizes may be estimates; duration/quality can be unknown when the source provides no usable metadata. Ads/previews remain visible in their group and are not silently hidden.
 - Full depends on tools installed on the user's Mac. New yt-dlp site requirements can change; no universal website guarantee is made.
-- Native failed downloads can retain named resumable data for retry; completion requires native validation. No claim is made that every interrupted transfer leaves zero temporary data.
+- HLS now saves per-segment checksums and durable receipts in a per-job hidden directory. Compatible interrupted jobs can resume after verification; completed jobs remove segments and keys. Old .part files without compatible checkpoints are preserved but are not claimed resumable. No claim is made that every interrupted transfer leaves zero temporary data.
 - Live extension loading, fresh-machine installation and real multi-site downloads were **not completed in this release session**. Chrome's internal extension page was blocked by the browser automation policy. See [validation evidence and remaining manual checks](VALIDATION.md).
 
 ## Troubleshooting
@@ -75,7 +95,7 @@ Chrome 119+ / Manifest V3 is required. **Windows and Linux are not claimed as te
 | No media listed | Reload the webpage after first installation, play for 3–5 seconds, then refresh the popup. Restricted Chrome/internal pages are not video sources. |
 | “需要 macOS Full” | The selected item is HLS/DASH or a site extractor. Install Full with its dependencies, or choose a direct MP4/WebM. |
 | Native Host not found / forbidden | Run Full's installer; use Google Chrome and extension ID `mabnjnddplpelefjgohbjcoajnimpgna`. Other Chromium browsers are not registered. |
-| Missing Python / yt-dlp / FFmpeg | Install dependencies, then rerun `install.command`. `install.command --check --non-interactive` checks without registering. |
+| Missing Python / yt-dlp / FFmpeg | Install dependencies, then rerun `install.command`. After the first runtime installation, `install.command --check --non-interactive` checks without registering or downloading dependencies. |
 | Installer blocked by macOS | Read the macOS notice and your security settings; use the Chrome edition if you do not want to run local scripts. This package is not notarized. |
 | `SERVER_FORBIDDEN`, expired URL, or failed direct download | Play the video again, refresh the resource list and select its fresh URL. Check Chrome's Downloads page; servers may require Full or reject downloads. |
 | Changed to another video | Reopen/refresh the popup and select the new resource. Stale sessions are rejected; do not reuse an old selection. |
@@ -83,13 +103,13 @@ Chrome 119+ / Manifest V3 is required. **Windows and Linux are not claimed as te
 
 ## Privacy and permissions
 
-No analytics or remote executable JavaScript is included. `<all_urls>`, tabs, scripting and webRequest enable media detection across pages and embedded frames. Downloads permission controls direct-file transfers. Only Full requests `nativeMessaging`. Request cookies may be used locally by Full when enabled; never upload them or local logs. Exported diagnostics redact credentials, titles, URL paths/queries and local user directories. Review any report before sharing it.
+No analytics or remote executable JavaScript is included. `<all_urls>`, tabs, scripting and webRequest enable media detection across pages and embedded frames. Downloads permission controls direct-file transfers. Only Full requests `nativeMessaging`. Full keeps request cookies only for recognized media. Reading the local Chrome cookie database for page extraction is optional and off by default (existing saved preferences remain). An extensionless media request first identified by its response may require playback to request it again before credentials can be captured. Request cookies may be used locally by Full when enabled; never upload them or local logs. Exported diagnostics redact credentials, titles, URL paths/queries and local user directories. Review any report before sharing it.
 
 The manifest contains a **public key**, which keeps the extension ID stable. No signing private key is included. Our source is MIT; third-party tools retain their own licenses. The input FFmpeg executables are excluded from public packages because their dynamic libraries and corresponding build provenance were not supplied. [Third-party audit](THIRD_PARTY_NOTICES.md).
 
 ## Build and regression tests
 
-For contributors with Node.js and Python 3.9+:
+For contributors with Node.js and Python 3.11+:
 
 ```sh
 bash scripts/test.sh

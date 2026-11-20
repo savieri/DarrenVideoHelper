@@ -2,10 +2,12 @@ const DEFAULT_SETTINGS = {
   outputDir: "~/Downloads/video_downloads",
   defaultQuality: "best",
   maxConcurrent: 2,
-  autoCookies: true,
+  autoCookies: false,
   skipDownloaded: true,
   onlyMp4: true,
   nativeDirect: false,
+  networkRetries: 4,
+  networkTimeout: 20,
   showAdvanced: false
 };
 
@@ -17,6 +19,8 @@ const fields = {
   skipDownloaded: document.getElementById("skipDownloaded"),
   onlyMp4: document.getElementById("onlyMp4"),
   nativeDirect: document.getElementById("nativeDirect"),
+  networkRetries: document.getElementById("networkRetries"),
+  networkTimeout: document.getElementById("networkTimeout"),
   showAdvanced: document.getElementById("showAdvanced")
 };
 const statusEl = document.getElementById("status");
@@ -33,11 +37,15 @@ async function load() {
   fields.outputDir.value = settings.outputDir || DEFAULT_SETTINGS.outputDir;
   fields.defaultQuality.value = settings.defaultQuality || DEFAULT_SETTINGS.defaultQuality;
   fields.maxConcurrent.value = settings.maxConcurrent || DEFAULT_SETTINGS.maxConcurrent;
-  fields.autoCookies.checked = settings.autoCookies !== false;
+  fields.networkRetries.value = settings.networkRetries ?? 4;
+  fields.networkTimeout.value = settings.networkTimeout ?? 20;
+  fields.autoCookies.checked = settings.autoCookies === true;
   fields.skipDownloaded.checked = settings.skipDownloaded !== false;
   fields.onlyMp4.checked = settings.onlyMp4 !== false;
   fields.nativeDirect.disabled = !chrome.runtime.getManifest().permissions?.includes("nativeMessaging");
   fields.nativeDirect.checked = !fields.nativeDirect.disabled && settings.nativeDirect === true;
+  fields.networkRetries.disabled = fields.nativeDirect.disabled;
+  fields.networkTimeout.disabled = fields.nativeDirect.disabled;
   fields.showAdvanced.checked = settings.showAdvanced === true;
 }
 
@@ -50,6 +58,8 @@ async function save() {
     skipDownloaded: fields.skipDownloaded.checked,
     onlyMp4: fields.onlyMp4.checked,
     nativeDirect: !fields.nativeDirect.disabled && fields.nativeDirect.checked,
+    networkRetries: Math.max(0, Math.min(8, Number(fields.networkRetries.value) || 0)),
+    networkTimeout: Math.max(2, Math.min(60, Number(fields.networkTimeout.value) || 20)),
     showAdvanced: fields.showAdvanced.checked
   };
   const response = await sendMessage({ type: "saveSettings", settings });

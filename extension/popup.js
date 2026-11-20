@@ -569,6 +569,7 @@ function renderJobs() {
     top.appendChild(status);
     const title = document.createElement("span");
     title.textContent = job.title || "";
+    title.title = job.title || "";
     top.appendChild(title);
     item.appendChild(top);
 
@@ -583,24 +584,24 @@ function renderJobs() {
     message.textContent = jobLine(job);
     item.appendChild(message);
 
-    if (job.outputPath) {
+    if (job.outputPath && job.status === "completed") {
       const output = document.createElement("code");
       const size = job.fileSize ? ` (${formatBytes(job.fileSize)})` : "";
-      output.textContent = `${job.outputPath}${size}`;
+      output.textContent = `${job.outputPath.split(/[\\/]/).pop()}${size}`;
       item.appendChild(output);
     }
 
     const controls = document.createElement("div");
     controls.className = "job-controls";
-    if (["queued", "paused", "downloading", "merging"].includes(job.status)) {
+    if (["queued", "paused", "downloading", "merging", "recovering", "verifying"].includes(job.status)) {
       const cancel = document.createElement("button");
       cancel.type = "button";
       cancel.className = "small";
       cancel.textContent = "Cancel";
-      cancel.addEventListener("click", () => sendMessage({ type: "cancelJob", jobId: job.id }));
+      cancel.addEventListener("click", () => sendMessage({ type: "cancelJob", jobId: job.id, keepData: job.browserDownload ? true : window.confirm("保留此任务的恢复数据？点击取消将清理此任务的临时数据，不删除已完成文件。") }));
       controls.appendChild(cancel);
     }
-    if (["failed", "incomplete"].includes(job.status) && (job.details || job.logs?.length)) {
+    if (["failed", "incomplete", "attention"].includes(job.status) && (job.details || job.logs?.length)) {
       const details = document.createElement("details");
       details.open = expanded.has(job.id);
       const summary = document.createElement("summary");
@@ -612,14 +613,17 @@ function renderJobs() {
       details.appendChild(pre);
       controls.appendChild(details);
     }
-    if (["failed", "incomplete", "cancelled"].includes(job.status)) {
+    if (["failed", "incomplete", "cancelled", "attention"].includes(job.status)) {
       const retry = document.createElement("button");
       retry.type = "button"; retry.className = "small";
-      retry.textContent = job.validationPending ? "重新校验" : "重试 / 续传";
-      retry.addEventListener("click", () => sendMessage({ type: "retryJob", jobId: job.id }));
+      retry.textContent = job.canResume ? "验证后续传" : job.validationPending ? "重新校验" : "重新尝试";
+      retry.addEventListener("click", async () => {
+        const result = await sendMessage({ type: "retryJob", jobId: job.id });
+        if (!result?.ok) showNotice(result?.error || "无法重试。", "error");
+      });
       controls.appendChild(retry);
     }
-    if (["completed", "failed", "incomplete", "cancelled"].includes(job.status)) {
+    if (["completed", "failed", "incomplete", "cancelled", "attention"].includes(job.status)) {
       const diagnostics = document.createElement("button");
       diagnostics.type = "button";
       diagnostics.className = "small";
@@ -632,6 +636,29 @@ function renderJobs() {
         } catch (error) { showNotice(error.message, "error"); }
       });
       controls.appendChild(diagnostics);
+    }
+    if (["attention", "incomplete", "failed"].includes(job.status) && /^hls/.test(job.kind || "")) {
+      const refresh = document.createElement("button"); refresh.type = "button"; refresh.className = "small";
+      refresh.textContent = "重新检测并恢复";
+      refresh.addEventListener("click", async () => {
+        const result = await sendMessage({ type: "resumeWithCurrent", jobId: job.id });
+        if (!result?.ok) showNotice(result?.error || "无法恢复。", "error");
+      }); controls.appendChild(refresh);
+    }
+    if (["attention", "failed", "incomplete", "cancelled"].includes(job.status) && (job.canResume || job.fragmentsDone > 0)) {
+      const clear = document.createElement("button"); clear.type = "button"; clear.className = "small"; clear.textContent = "清理恢复数据";
+      clear.addEventListener("click", async () => {
+        if (!window.confirm("仅清理此任务的临时恢复数据？已完成文件不会被删除。")) return;
+        const result = await sendMessage({ type: "cancelJob", jobId: job.id, keepData: false });
+        if (!result?.ok) showNotice(result?.error || "无法清理。", "error");
+      }); controls.appendChild(clear);
+    }
+    if (job.status === "completed") {
+      const open = document.createElement("button"); open.type = "button"; open.className = "small"; open.textContent = "显示文件";
+      open.addEventListener("click", async () => {
+        const result = await sendMessage({ type: "openJobOutput", jobId: job.id });
+        if (!result?.ok) showNotice(result?.error || "无法显示文件。", "error");
+      }); controls.appendChild(open);
     }
     if (controls.childNodes.length) item.appendChild(controls);
 
@@ -657,21 +684,20 @@ function focusJob(jobId) {
 }
 
 function jobStatus(job) {
-  if (job.status === "completed") return "Completed";
-  if (job.status === "failed") return "Failed";
-  if (job.status === "incomplete") return job.validationPending ? "成品待校验" : "未完成，可续传";
-  if (job.status === "queued") return "Queued";
-  if (job.status === "paused") return "Paused";
-  if (job.status === "cancelled") return "Canceled";
-  if (job.status === "merging") return "Finalizing · 合并 / 校验中";
-  if (job.percent) return `${job.percent}%`;
-  return "Running";
+  const labels = { queued: "Waiting", downloading: "Downloading", paused: "Paused", recovering: "Recovering",
+    attention: "Requires attention", verifying: "Verifying", merging: "Verifying · 合并中",
+    completed: "Completed", failed: "Failed", cancelled: "Cancelled" };
+  if (job.status === "incomplete") return job.canResume ? "Paused · 可验证后续传" : "Requires attention";
+  return labels[job.status] || "Requires attention";
 }
 
 function jobLine(job) {
   const parts = [job.message || job.error || ""];
-  if (job.status === "downloading" && job.speed) parts.push(job.speed);
-  if (job.status === "downloading" && job.eta) parts.push(`ETA ${job.eta}`);
+  if (job.fragmentsTotal) parts.push(`分片 ${job.fragmentsDone || 0}/${job.fragmentsTotal}`);
+  if (job.downloadedBytes) parts.push(`已接收 ${formatBytes(job.downloadedBytes)}`);
+  if (["downloading", "recovering"].includes(job.status) && job.speed) parts.push(job.speed);
+  if (["downloading", "recovering"].includes(job.status) && job.eta) parts.push(`ETA ${job.eta}`);
+  if (["merging", "verifying"].includes(job.status)) parts.push("下载阶段结束，尚未确认完成");
   return parts.filter(Boolean).join(" · ");
 }
 
