@@ -89,10 +89,8 @@ cat > "$HOST_TEMP" <<'HOST'
 set -euo pipefail
 
 NATIVE_ROOT="$(cd "$(dirname "$0")" && pwd)"
-LOG_DIR="$HOME/Library/Logs/DarrenVideoHelper"
-LOG_PATH="$LOG_DIR/native-host.log"
-
-mkdir -p "$LOG_DIR"
+LOG_PATH="${VIDEO_HELPER_LOG_PATH:-$HOME/Library/Logs/DarrenVideoHelper/native-host.log}"
+mkdir -p "$(dirname "$LOG_PATH")"
 export PATH="$NATIVE_ROOT/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 exec /usr/bin/python3 "$NATIVE_ROOT/host.py" "$@" 2>> "$LOG_PATH"
 HOST
@@ -148,6 +146,7 @@ for tool in ("ffmpeg", "ffprobe"):
         raise SystemExit(f"Expected bundled {tool} at {expected}, got: {actual}")
 ' "$NATIVE_INSTALL_DIR"
 echo "Native-host self-test passed."
+"$HOST_PATH" --recover-legacy-outputs
 echo
 
 if [[ "$NO_OPEN" -eq 0 ]]; then

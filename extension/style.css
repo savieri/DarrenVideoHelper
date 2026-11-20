@@ -431,14 +431,9 @@ h2 {
   margin-top: 7px;
 }
 
-.actions {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  margin-top: 8px;
-}
-
 .quality-select {
-  width: 100%;
+  width: auto;
+  max-width: 105px;
   min-width: 0;
   height: 28px;
   border-radius: 8px;
@@ -454,6 +449,8 @@ h2 {
   border-radius: 8px;
   padding: 5px 10px;
 }
+.actions button { white-space: nowrap; }
+.job-controls details { flex-basis: 100%; }
 
 .source-details {
   margin-top: 7px;
@@ -582,7 +579,6 @@ code {
 }
 
 details {
-  flex: 1;
   min-width: 0;
   color: var(--muted);
 }
@@ -684,3 +680,33 @@ footer button {
     background: rgba(0, 0, 0, 0.28);
   }
 }
+
+.job.incomplete { border-color: #be8b28; }
+.job.incomplete .job-top strong { color: #9d6c12; }
+
+
+.resource-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px 10px;
+  font-size: 12px;
+}
+
+.resource-toolbar[hidden] { display: none; }
+.resource-toolbar select {
+  margin-left: 3px;
+  color: inherit;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 5px;
+}
+
+.capture-details { margin: 0 12px 10px; font-size: 12px; }
+.capture-details ul { padding-left: 18px; overflow-wrap: anywhere; }
+.resource-group { margin-bottom: 10px; }
+.resource-group > summary { padding: 5px 4px; cursor: pointer; font-weight: 650; }
+.resource-group .stream-card { margin-top: 6px; }
+.stream-card .source-details { overflow-wrap: anywhere; }

@@ -56,8 +56,8 @@ if [[ "$BUILD_PACKAGE" -eq 1 ]]; then
     DARREN_BUILD_OUTPUT_DIR="$DEV_INSTALL_ROOT" \
     "$PROJECT_ROOT/build-macos-package.command"
   cp -f \
-    "$DEV_INSTALL_ROOT/DarrenVideoHelper-macOS-v1.2.0-beta.3.zip" \
-    "$HOME/Downloads/DarrenVideoHelper-macOS-v1.2.0-beta.3.zip"
+    "$DEV_INSTALL_ROOT/DarrenVideoHelper-macOS-v1.2.1-beta.15.zip" \
+    "$HOME/Downloads/DarrenVideoHelper-macOS-v1.2.1-beta.15.zip"
 fi
 
 echo
@@ -65,5 +65,5 @@ echo "Development extension synced to:"
 echo "$DEV_INSTALL_ROOT/extension"
 if [[ "$BUILD_PACKAGE" -eq 1 ]]; then
   echo "Installer package copied to:"
-  echo "$HOME/Downloads/DarrenVideoHelper-macOS-v1.2.0-beta.3.zip"
+  echo "$HOME/Downloads/DarrenVideoHelper-macOS-v1.2.1-beta.15.zip"
 fi

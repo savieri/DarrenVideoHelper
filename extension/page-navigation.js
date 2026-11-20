@@ -8,7 +8,7 @@
   let finishTimer = 0;
   let lastBilibiliSignature = "";
 
-  function post(phase, reason, previousHref = lastHref) {
+  function post(phase, reason, previousHref = lastHref, at = Date.now()) {
     const href = location.href;
     window.postMessage({
       source: SOURCE,
@@ -17,7 +17,7 @@
       reason,
       href,
       previousHref,
-      at: Date.now()
+      at
     }, location.origin === "null" ? "*" : location.origin);
     lastHref = href;
   }
@@ -249,16 +249,18 @@
     if (typeof original !== "function") continue;
     history[method] = function darrenVideoHistoryBridge(...args) {
       const previousHref = location.href;
-      post("start", `history.${method}`, previousHref);
+      const observedAt = Date.now();
       const result = original.apply(this, args);
-      post("commit", `history.${method}`, previousHref);
-      finishSoon(`history.${method}`);
+      if (location.href !== previousHref) {
+        post("commit", `history.${method}`, previousHref, observedAt);
+        finishSoon(`history.${method}`);
+      }
       return result;
     };
   }
 
   window.addEventListener("popstate", () => {
-    post("start", "popstate");
+    if (location.href === lastHref) return;
     post("commit", "popstate");
     finishSoon("popstate");
   }, true);
@@ -266,7 +268,6 @@
   window.setInterval(() => {
     if (location.href === lastHref) return;
     const previousHref = lastHref;
-    post("start", "location-poll", previousHref);
     post("commit", "location-poll", previousHref);
     finishSoon("location-poll");
   }, 500);

@@ -8,14 +8,12 @@ It does not decrypt DRM, bypass paywalls, bypass login, or defeat site access co
 
 ## Current Release Status
 
-`v1.2.0-beta.3` is a prerelease. It replaces the macOS PyInstaller Python host with the verified source-host chain, validates an MP4 before interpreting yt-dlp's final exit code, prevents a late error from overwriting a verified completion, fixes popup width expansion, and adds a bounded hover video preview. Automated regressions, isolated installation, framed direct-MP4/HLS/YouTube downloads, and headless popup layout/preview checks pass. The full real-Chrome matrix in [VALIDATION.md](VALIDATION.md) still requires manual completion, so this is not a stable release.
-
-The version is `1.2.0` rather than `1.1.2` because it changes both session lifecycle behavior and the popup's media model/UI. The beta suffix records that real A/B file-content verification is still open.
+`v1.2.1-beta.6` is a macOS prerelease. HLS refresh jobs are checkpointed in session storage before page reload and resume automatically when the new content script reports ready, including after the MV3 worker restarts. One refresh is allowed per job. A 15-second resniff deadline produces an explicit error if no matching fresh HLS is found. See [VALIDATION.md](VALIDATION.md) for browser and downloader evidence and remaining live-site limitations.
 
 ## Release Package
 
 ```text
-DarrenVideoHelper-macOS-v1.2.0-beta.3.zip
+DarrenVideoHelper-macOS-v1.2.1-beta.6.zip
 ```
 
 This prerelease is verified and published for macOS only. A Windows package is not attached because the current beta was not rebuilt and validated on Windows.
@@ -90,7 +88,7 @@ Stage executable arm64 `ffmpeg` and `ffprobe` under `native/bin`, or point the b
 DARREN_MACOS_TOOLS_DIR="/path/to/macos/tools" ./build-macos-package.command
 ```
 
-The builder refuses an unexpected version, a PyInstaller `native/host`, or a bundled macOS yt-dlp. It runs `host.py --self-test` from the staged package before creating `dist/DarrenVideoHelper-macOS-v1.2.0-beta.3.zip`.
+The builder refuses an unexpected version, a PyInstaller `native/host`, or a bundled macOS yt-dlp. It runs `host.py --self-test` from the staged package before creating `dist/DarrenVideoHelper-macOS-v1.2.1-beta.6.zip`.
 
 For a visible, fixed Chrome development path, run:
 
@@ -173,10 +171,10 @@ To return to the last published stable build, download `DarrenVideoHelper-macOS.
 
 ## Native Host Command Shape
 
-The native host runs a command equivalent to:
+For directly detected media the native host uses the captured request context. Page extractors can optionally try the local Chrome Cookie database. If the database is unavailable, the host retries once without it. The native host runs a command equivalent to:
 
 ```bash
-yt-dlp --cookies-from-browser chrome --referer "<current page URL>" \
+yt-dlp --ignore-config --referer "<captured Referer>" \
   --continue --retries 5 --fragment-retries 8 \
   -f "bv*+ba/best" \
   --merge-output-format mp4 \
@@ -213,5 +211,3 @@ Downloads are marked `Done` only when:
 - file size and duration are valid
 
 The native host performs these checks even when yt-dlp exits nonzero. It accepts only the exact MP4 target assigned to that job attempt, never a fuzzy directory match. A verified MP4 is reported as `Completed` and is never deleted or overwritten by a trailing progress event, SSL EOF, timeout, 403, post-processing warning, disconnect, or late native error. Page-duration metadata is retained as diagnostics only because it can be stale or describe an ad/player state. If the exact MP4 does not pass ffprobe, the job reports `Failed`; invalid partial MP4 files and image/sidecar outputs from the current job are cleaned up.
-
-# Test 1

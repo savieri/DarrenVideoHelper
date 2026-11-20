@@ -9,6 +9,7 @@
   let pendingTimer = 0;
   let activePreviewSession = null;
   let lastSiteMediaContext = null;
+  const videoActivity = new WeakMap();
   const PAGE_PREVIEW_INTERVAL_MS = 320;
   const PAGE_PREVIEW_MAX_MS = 8000;
 
@@ -78,13 +79,12 @@
     return Array.from(document.querySelectorAll("video"))
       .filter((video) => video.currentSrc || video.src || video.duration || video.videoWidth || video.clientWidth)
       .sort((left, right) => {
-        const playingDiff = Number(!right.paused) - Number(!left.paused);
-        if (playingDiff) return playingDiff;
-        const leftArea = (left.videoWidth || left.clientWidth || 0) * (left.videoHeight || left.clientHeight || 0);
-        const rightArea = (right.videoWidth || right.clientWidth || 0) * (right.videoHeight || right.clientHeight || 0);
-        const areaDiff = rightArea - leftArea;
-        if (areaDiff) return areaDiff;
-        return (right.duration || 0) - (left.duration || 0);
+        const area = v => (v.videoWidth || v.clientWidth || 0) * (v.videoHeight || v.clientHeight || 0);
+        const active = v => { const activity = videoActivity.get(v) || {}; const now = Date.now();
+          return (!v.paused && !v.ended ? 1_000_000 : 0)
+            + (now - (activity.progressAt || 0) < 2500 ? 500_000 : 0)
+            + (now - (activity.playingAt || activity.playAt || 0) < 30000 ? 250_000 : 0); };
+        return active(right) - active(left) || area(right) - area(left) || (right.duration || 0) - (left.duration || 0);
       })[0] || null;
   }
 
@@ -94,9 +94,9 @@
   }
 
   function send(message) {
-    chrome.runtime.sendMessage(message, () => {
-      void chrome.runtime.lastError;
-    });
+    try {
+      chrome.runtime.sendMessage(message, () => { void chrome.runtime.lastError; });
+    } catch { /* The page can retain an old content world after extension reload. */ }
   }
 
   function sendPreviewEvent(message) {
@@ -185,6 +185,11 @@
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === "resniffMedia") {
+      schedule();
+      sendResponse({ ok: true, pageUrl: location.href });
+      return false;
+    }
     if (message?.type === "startPagePreview") {
       const ok = startPagePreview(message.token, message.maxDurationMs);
       sendResponse({ ok });
@@ -213,7 +218,7 @@
     return false;
   });
 
-  function navigationContext(phase, reason, href = location.href, previousHref = "") {
+  function navigationContext(phase, reason, href = location.href, previousHref = "", observedAt = Date.now()) {
     const videoId = youtubeVideoId(href);
     return {
       type: "videoNavigation",
@@ -224,12 +229,12 @@
         previousPageUrl: previousHref,
         pageIdentity: pageIdentity(href),
         videoId,
-        observedAt: Date.now()
+        observedAt
       }
     };
   }
 
-  function publishNavigation(phase, reason, href = location.href, previousHref = "") {
+  function publishNavigation(phase, reason, href = location.href, previousHref = "", observedAt = Date.now()) {
     const identity = pageIdentity(href);
     if (phase === "start") {
       navigationPending = true;
@@ -237,7 +242,7 @@
     } else if (!navigationPending && identity === lastCommittedIdentity && href === lastCommittedHref && reason !== "bridge-ready") {
       return;
     }
-    send(navigationContext(phase, reason, href, previousHref));
+    send(navigationContext(phase, reason, href, previousHref, observedAt));
     if (phase !== "start") {
       navigationPending = false;
       lastCommittedIdentity = identity;
@@ -313,7 +318,7 @@
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
     if (event.data?.source === NAVIGATION_SOURCE && event.data?.type === "navigation") {
-      publishNavigation(event.data.phase, event.data.reason, event.data.href, event.data.previousHref || "");
+      publishNavigation(event.data.phase, event.data.reason, event.data.href, event.data.previousHref || "", event.data.at || Date.now());
       schedule();
       return;
     }
@@ -339,8 +344,19 @@
     }, true);
   }
 
-  for (const eventName of ["play", "loadedmetadata", "durationchange", "emptied", "abort"]) {
-    document.addEventListener(eventName, schedule, true);
+  for (const eventName of ["play", "playing", "pause", "timeupdate", "loadedmetadata", "durationchange", "emptied", "abort"]) {
+    document.addEventListener(eventName, event => {
+      if (event.target instanceof HTMLVideoElement) {
+        const activity = videoActivity.get(event.target) || { lastTime: 0 };
+        const currentTime = Number.isFinite(event.target.currentTime) ? event.target.currentTime : 0;
+        if (currentTime > activity.lastTime + 0.04) activity.progressAt = Date.now();
+        if (eventName === "play") activity.playAt = Date.now();
+        if (eventName === "playing") activity.playingAt = Date.now();
+        activity.lastTime = currentTime;
+        videoActivity.set(event.target, activity);
+      }
+      schedule();
+    }, true);
   }
   window.addEventListener("popstate", () => {
     publishNavigation("commit", "content-popstate");
@@ -358,7 +374,6 @@
   window.setInterval(() => {
     const identity = pageIdentity();
     if (identity !== lastCommittedIdentity || location.href !== lastCommittedHref) {
-      publishNavigation("start", "content-location-poll", location.href, lastCommittedHref);
       publishNavigation("commit", "content-location-poll", location.href, lastCommittedHref);
     }
     if (pageIdentity().startsWith("bilibili:")) {
@@ -372,6 +387,12 @@
     schedule();
   }, 500);
 
+  const announceReady = () => {
+    try { chrome.runtime.sendMessage({ type: "CONTENT_READY", pageUrl: location.href }, () => { void chrome.runtime.lastError; }); } catch {}
+  };
+  announceReady();
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", announceReady, { once: true });
+  window.addEventListener("pageshow", announceReady);
   publishNavigation("commit", "content-ready");
   schedule();
 })();

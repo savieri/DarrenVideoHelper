@@ -1,4 +1,89 @@
+## 1.2.1-beta.15
+
+- Recover media scans after same-tab navigation using the committed top-level frame when events arrive late or are missed.
+- Ignore redundant history notifications and keep previous-video resources out of the new scan.
+- Use the exact resource card title for new download jobs and MP4 filenames. Treat percent signs in titles as literal characters.
+
+## 1.2.1-beta.14
+
+- Use the beta.12 popup layout and align resource controls. Keep current results visible while scanning, serialize refreshes and invalidate old cards on video switches.
+- Retry timed-out decode samples without redownloading. The installer can recover earlier, verified MP4s incorrectly rejected by the old decode timeout and clean only their temporary files.
+- Keep resumable download files in a hidden, job-scoped folder. Clean them after validation succeeds.
+
+## 1.2.1-beta.13
+
+- Align resource cards and their actions. Show duration, resolution and file size on a dedicated row.
+- Add new light and dark themes, a download queue shortcut and new extension icons.
+
+## 1.2.1-beta.12
+
+- List observed HLS manifests and renditions, MP4 and WebM separately with sorting, status, playback association, copy and download actions.
+- Recommend only resources supported by matching duration and player evidence. Preserve other candidates for inspection and selection.
+- Calculate HLS size from measured response bytes, declared byte ranges or declared bitrate.
+- Keep the selected rendition URL fixed, pair declared audio where applicable and verify the MP4 output before completion.
+
+## 1.2.1-beta.11
+
+- Verify unbound HLS candidates against the long-form player, including master variants. Prevent a short autoplay clip from replacing the main player or its download.
+- Keep a mismatched final MP4 out of Completed when the task carries a verified main-player duration.
+
+## 1.2.1-beta.10
+
+- Direct HLS and MP4 downloads use the selected request context without requiring access to Chrome's Cookie database.
+- Download tasks export separate stdout and stderr records, exit codes and tool versions. Failure cards surface the underlying error.
+- HLS candidates retain their active-video association across rescans. A refreshed URL must match the original video.
+- The host stops interrupted or idle yt-dlp processes and cleans task-owned fragments. An expired HLS URL clears its old resume files.
+- Final MP4 validation checks the container, a readable video packet, and duration before the task completes.
+
+# 1.2.1-beta.9 — 2026-10-07
+
+- 为同一标签页内的每个 video/source 建立独立 mediaId；同一 DOM 元素更换 source 会产生新媒体身份。
+- active media 改为动态评分：时间正在推进、最近 play/playing、最近 HLS 请求、可见面积和用户交互依次参与；不再把第一个或最大视频永久锁为主视频。
+- popup 打开/刷新会触发实时重扫；下载按钮冻结当前 activeMediaId、标题、frame、source 和时长快照，切换视频不会串改已开始的任务。
+- Native Host 以最终 MP4 存在、大小、容器、视频流和 ffprobe 时长为成功核心；网页元数据时长偏差降级为 warning，不再否定有效成品。
+- Completed 在扩展和 Native Host 磁盘账本中保持不可逆；attemptId/port generation 拒绝旧回调，并记录 ACTIVE_MEDIA_CHANGED、JOB_TERMINAL 与 IGNORED_STALE_TERMINAL_UPDATE。
+- 成功后按固定 job basename 清理自身 `.part`、`.ytdl` 和 `part-Frag`；真实失败保留可续传主 `.part/.ytdl`，孤立 fragment 会被清理。
+
+# 1.2.1-beta.7 — 2026-10-03
+
+- 移除 HLS 过期恢复的默认整页 reload；等待播放器实时请求并持久化恢复同一个下载任务。
+- 统一 network / fetch / XHR / performance / player hints，识别无 m3u8 后缀的 index-*，加入近期请求缓冲和 expiry 筛选。
+- 对旧候选校验 manifest 内容；失败 URL 不重复派发，保留单次恢复限制。
+- Native Host 对 yt-dlp 输出额外脱敏；UI 布局和权限不变。
+- 72 项 JavaScript、23 项 Python 检查通过。真实 MissAV/phncdn 验收被浏览器站点安全策略阻止，未完成。详见 VALIDATION-beta7.md。
+
+# 1.2.1-beta.6 — 2026-10-03
+
+- Fix a lost download after HLS refresh: create and persist the original job before any URL check or page reload; a closed popup no longer owns the operation.
+- Persist job ID, tab/page/video identity, original candidate/master context, format, quality, one-refresh budget, deadline and lifecycle state in chrome.storage.session.
+- Add DOWNLOAD_START → URL_STALE → REFRESH_REQUESTED → PAGE_RELOADING → CONTENT_READY → RESNIFFING → FRESH_CANDIDATE_FOUND → RESUME_DOWNLOAD → DONE/FAILED checkpoints. Restore pending refresh jobs after a service-worker restart.
+- New content scripts announce CONTENT_READY; background resniffs player, performance and network evidence, then dispatches the same job to Native Host automatically.
+- Prefer an already refreshed matching candidate without reloading. If reload is necessary, wait up to 15 seconds; a persisted deadline plus Chrome alarm ensures an explicit failure after worker suspension.
+- Limit automatic refresh to once across preflight, Native Host errors and worker restarts. Verify page/title/video IDs, CDN asset path, duration, quality and master relationships to exclude unrelated streams.
+- Persist lifecycle diagnostics with job ID, reload/READY events, candidate counts, selected URL hashes and native results. Popup layout and controls are unchanged.
+
+Validation: 64 JavaScript regressions and 22 Python tests passed. Real MV3 popup click → close popup → native 410 → page reload → forcibly stop worker → content READY → restore same job → yt-dlp/ffmpeg MP4 passed on a controlled HLS server. Also verified no-reload refresh, preflight refresh, timeout shown after reopening popup, second-error termination, and ordinary MP4/HLS outputs. The original external CDN video was not re-downloaded in this validation.
+
+# 1.2.1-beta.5 — 2026-09-20
+
+- Track signed HLS URL detection time, expiry, page/frame context and master playlists. Preserve raw query bytes through Native Messaging.
+- Re-read current page media and probe HLS on enqueue and queue dispatch; reload the original page when its signed link has expired.
+- Native HTTP 410/403 requests one page-side URL refresh and one automatic retry; repeated expiration fails explicitly.
+- Log detection/start time, host, expiry and before/after SHA-256 URL hashes without Cookie headers.
+- Update both extension and source Native Host; existing MP4 and site extractor paths remain supported.
+
 # Changelog
+
+## Unreleased - beta.3 video detection fix
+
+- Restores HLS/MP4 candidates and request headers from bounded `chrome.storage.session` snapshots before processing worker-startup events. Closed tabs and mismatched page/document identities are discarded; segment samples are never persisted.
+- Actively scans MAIN-world resource timing on every popup open/refresh, including playlists loaded before the popup and videos exposing only a `blob:` source. Playlists take priority over newer segments; recovery respects SPA navigation timestamps and excludes the previous video's URLs.
+- Detects extensionless HLS/MP4 from response MIME types and parses extensionless playlists to distinguish master/media candidates.
+- Confirms origin-only extensionless SPA candidates against post-boundary MAIN-world resource timing, including after a worker restart; new media capture refreshes an already-open popup.
+- Buffers navigation-time requests for up to 30 seconds and 40 candidates, preserving playlists over segment floods. Only candidates with matching new document/page context are merged after commit; lightweight media candidates survive a worker restart during navigation.
+- Enables the existing history navigation bridge for ordinary HLS pages and retains the original MAIN-world boundary timestamp. Failed document navigation reactivates the old session.
+- Keeps HLS playlists in memory when segment samples fill the tab limit, and excludes conventional MP4 initialization fragments from whole-video recommendations.
+- Adds detection regressions and a real MV3 Chrome smoke test with playable local HLS/MSE, an actual stopped/restarted worker, extensionless MIME capture, and automatic popup updates across SPA video switches.
 
 ## 1.2.0-beta.3 - 2026-08-17
 

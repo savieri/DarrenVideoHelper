@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
+import hashlib
+import signal
+from contextlib import contextmanager
 import json
 import logging
 import os
+import queue
 import re
+import select
 import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from urllib.parse import urlparse, urlsplit, urlunsplit
+from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl
 
-HOST_VERSION = "1.2.0-beta.3"
+HOST_VERSION = "1.2.1-beta.15"
 DEFAULT_OUTPUT_DIR = Path.home() / "Downloads" / "video_downloads"
-LOG_PATH = Path.home() / "Library" / "Logs" / "DarrenVideoHelper" / "native-host.log"
+LOG_PATH = Path(os.environ.get("VIDEO_HELPER_LOG_PATH") or Path.home() / "Library/Logs/DarrenVideoHelper/native-host.log")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
 SIDE_EXTENSIONS = IMAGE_EXTENSIONS | {
     ".description",
@@ -27,6 +33,135 @@ SIDE_EXTENSIONS = IMAGE_EXTENSIONS | {
 }
 LOGGER = logging.getLogger("DarrenVideoHelper.native")
 TERMINAL_JOB_TYPES = {}
+JOB_CONTEXT = {}
+TOOL_CACHE = {}
+TOOL_VERSIONS = {}
+DOWNLOAD_IDLE_TIMEOUT = 90
+NATIVE_INPUT = None
+STATE_DIR = Path(os.environ.get("VIDEO_HELPER_STATE_DIR") or Path.home() / "Library/Application Support/DarrenVideoHelper/jobs")
+
+
+class OutputValidationError(RuntimeError):
+    pass
+
+
+class OutputValidationTimeout(OutputValidationError):
+    pass
+
+
+class DownloadTimedOut(RuntimeError):
+    pass
+
+
+class JobBusy(RuntimeError):
+    pass
+
+
+def state_path(job_id):
+    return STATE_DIR / (hashlib.sha256(job_id.encode()).hexdigest() + ".json")
+
+
+def read_state(job_id):
+    try:
+        return json.loads(state_path(job_id).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def write_state(job_id, patch):
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    saved = read_state(job_id)
+    if saved.get("status") == "completed" and patch.get("status", "completed") != "completed":
+        LOGGER.info("job=%s IGNORED_STALE_TERMINAL_UPDATE COMPLETED -> %s attempt=%s",
+                    job_id, patch.get("status"), patch.get("attemptId"))
+        return saved
+    incoming_attempt = patch.get("attemptId")
+    current_attempt = saved.get("currentAttemptId")
+    if (incoming_attempt and current_attempt and incoming_attempt != current_attempt
+            and patch.get("status") != "completed"):
+        LOGGER.info("job=%s ignored stale callback attempt=%s currentAttempt=%s status=%s",
+                    job_id, incoming_attempt, current_attempt, patch.get("status"))
+        return saved
+    saved.update(patch)
+    saved.update(jobId=job_id, updatedAt=time.time())
+    target = state_path(job_id)
+    temporary = target.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(saved, ensure_ascii=False))
+    temporary.chmod(0o600)
+    os.replace(temporary, target)
+    return saved
+
+
+@contextmanager
+def job_lock(job_id):
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = state_path(job_id).with_suffix(".lock").open("a+b")
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                lock.seek(0); lock.write(b"0"); lock.flush(); lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise JobBusy("同一任务仍在运行，未启动第二个下载进程。") from error
+        yield
+    finally:
+        lock.close()
+
+
+def emit_event(payload, notify=True):
+    job_id = payload.get("jobId")
+    context = JOB_CONTEXT.get(job_id, {})
+    payload.setdefault("attemptId", context.get("attemptId", ""))
+    event = payload.get("event") or payload.get("type")
+    states = {"download_started": "downloading", "finalizing": "finalizing",
+              "completed": "completed", "failed": "failed", "incomplete": "incomplete"}
+    if job_id and event in states:
+        if states[event] in ("completed", "failed", "incomplete"):
+            payload["exitCode"] = read_state(job_id).get("exitCode")
+            with job_log(job_id) as record:
+                record(event, message=redacted_output(payload.get("message", "")),
+                       error=redacted_output(payload.get("error", "")))
+        saved = write_state(job_id, {**payload, "status": states[event]})
+        LOGGER.info("job=%s attempt=%s terminal_transition=%s basename=%s", job_id,
+                    payload.get("attemptId"), states[event], Path(saved.get("outputPath") or "").name)
+    if notify:
+        send_message(payload)
+
+
+def incomplete(job_id, message, details=""):
+    if job_id in TERMINAL_JOB_TYPES:
+        return
+    emit_event({"type": "incomplete", "event": "incomplete", "jobId": job_id,
+                "message": message, "error": message, "details": diagnostic_details(details or message),
+                "retryable": True, "validationPending": bool(read_state(job_id).get("validationPending"))})
+    TERMINAL_JOB_TYPES[job_id] = "incomplete"
+
+
+def stop_process(process):
+    if process and process.poll() is None:
+        try:
+            if os.name != "nt":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                if os.name != "nt":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+            process.wait()
+
 
 
 def setup_logging():
@@ -48,9 +183,15 @@ def redacted_url(value):
         parsed = urlsplit(str(value))
         if parsed.scheme not in ("http", "https"):
             return str(value)
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", ""))
     except (TypeError, ValueError):
         return "<invalid-url>"
+
+
+def redacted_output(line):
+    # yt-dlp can echo the full signed URL even when the command log is redacted.
+    text = re.sub(r"https?://[^\s\"<>]+", lambda match: redacted_url(match.group(0)), str(line))
+    return re.sub(r"(?i)((?:cookie|authorization)\s*:\s*)[^\r\n]+", r"\1<redacted>", text)
 
 
 def redacted_command(command):
@@ -63,7 +204,7 @@ def redacted_command(command):
             redact_next = False
             continue
         result.append(redacted_url(text) if text.startswith(("http://", "https://")) else text)
-        if text in ("--add-header", "--cookies", "--cookies-from-browser", "-headers"):
+        if text in ("--add-header", "--cookies", "--cookies-from-browser", "-headers", "-f"):
             redact_next = True
     return result
 
@@ -118,6 +259,32 @@ def send_message(payload):
         raise NativePipeClosed(str(error))
 
 
+def job_log_path(job_id):
+    return state_path(job_id).with_suffix(".jsonl")
+
+
+@contextmanager
+def job_log(job_id):
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(job_log_path(job_id), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8", buffering=1) as log:
+        def record(event, **fields):
+            log.write(json.dumps({"time": time.time(), "event": event,
+                                  "attemptId": JOB_CONTEXT.get(job_id, {}).get("attemptId", ""),
+                                  **fields}, ensure_ascii=False) + "\n")
+        yield record
+
+
+def diagnostic_page(job_id, offset):
+    try:
+        with job_log_path(job_id).open(encoding="utf-8") as log:
+            log.seek(offset)
+            data = log.read(32 * 1024)
+            return {"data": data, "offset": log.tell(), "done": not log.read(1)}
+    except FileNotFoundError:
+        return {"data": "", "offset": 0, "done": True}
+
+
 def diagnostic_details(details=""):
     items = [str(details).strip()] if details else []
     items.append(f"Native host log: {LOG_PATH}")
@@ -146,11 +313,11 @@ def progress(job_id, message, percent=None, speed="", eta="", line="", stage="do
         payload["eta"] = eta
     if line:
         payload["line"] = line.rstrip()
-    send_message(payload)
+    emit_event(payload)
     return True
 
 
-def complete(job_id, output_path, probe):
+def complete(job_id, output_path, probe, notify=True):
     if job_id in TERMINAL_JOB_TYPES:
         LOGGER.info(
             "job=%s ignored duplicate complete after terminal=%s",
@@ -158,8 +325,9 @@ def complete(job_id, output_path, probe):
             TERMINAL_JOB_TYPES[job_id],
         )
         return False
-    send_message({
+    emit_event({
         "type": "complete",
+        "event": "completed",
         "jobId": job_id,
         "message": "下载完成，已输出 MP4。",
         "outputPath": str(output_path),
@@ -172,8 +340,16 @@ def complete(job_id, output_path, probe):
         "hasAudio": probe.get("hasAudio", False),
         "videoCodec": probe.get("videoCodec", ""),
         "audioCodec": probe.get("audioCodec", ""),
-    })
+        "warningCount": probe.get("warningCount", 0),
+        "warnings": probe.get("warnings", []),
+        "unverifiedOutput": False,
+        "validationPending": False,
+        "error": "",
+        "details": "",
+    }, notify=notify)
     TERMINAL_JOB_TYPES[job_id] = "complete"
+    LOGGER.info("JOB_TERMINAL: job=%s -> COMPLETED attempt=%s", job_id,
+                JOB_CONTEXT.get(job_id, {}).get("attemptId"))
     return True
 
 
@@ -186,14 +362,17 @@ def fail(job_id, message, reason="", details=""):
             str(reason or message).split("\n", 1)[0],
         )
         return False
-    send_message({
+    emit_event({
         "type": "error",
+        "event": "failed",
         "jobId": job_id,
         "message": message,
         "error": reason or message,
         "details": diagnostic_details(details or reason or message),
     })
     TERMINAL_JOB_TYPES[job_id] = "error"
+    LOGGER.info("JOB_TERMINAL: job=%s -> FAILED attempt=%s", job_id,
+                JOB_CONTEXT.get(job_id, {}).get("attemptId"))
     return True
 
 
@@ -215,17 +394,29 @@ def validate_url(url):
 
 
 def tool_path(name):
-    for candidate in bundled_tool_candidates(name):
-        if candidate.exists() and os.access(candidate, os.X_OK):
-            return str(candidate)
-
+    if name in TOOL_CACHE:
+        return TOOL_CACHE[name]
+    candidates = list(bundled_tool_candidates(name))
     found = shutil.which(name)
     if found:
-        return found
-    for prefix in ("/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"):
-        candidate = Path(prefix) / name
-        if candidate.exists() and os.access(candidate, os.X_OK):
-            return str(candidate)
+        candidates.append(Path(found))
+    candidates += [Path(prefix) / name for prefix in ("/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin")]
+    for candidate in dict.fromkeys(candidates):
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        try:
+            check = subprocess.run([str(candidate), "-version" if name in ("ffmpeg", "ffprobe") else "--version"],
+                                   capture_output=True, timeout=15)
+            if check.returncode != 0:
+                LOGGER.warning("tool=%s unusable candidate=%s exit=%s", name, candidate, check.returncode)
+                continue
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        TOOL_CACHE[name] = str(candidate)
+        output = getattr(check, "stdout", None)
+        TOOL_VERSIONS[name] = output.decode(errors="replace").splitlines()[0] if output and isinstance(output, bytes) else ""
+        LOGGER.info("tool=%s verified path=%s version=%s", name, candidate, TOOL_VERSIONS[name])
+        return str(candidate)
     raise FileNotFoundError(name)
 
 
@@ -248,12 +439,23 @@ def build_ytdlp_command(message, target_url, output_dir, output_name):
     page_url = message.get("pageUrl") or ""
     headers = message.get("headers") or {}
     settings = message.get("settings") or {}
-    auto_cookies = settings.get("autoCookies", True)
+    direct_media = message.get("kind") in ("hls_master", "hls_media", "mp4", "webm")
+    auto_cookies = settings.get("autoCookies", True) and not direct_media and not headers.get("cookie")
     selected_quality = message.get("qualityPreference") or settings.get("defaultQuality") or "best"
+    selector = quality_selector(selected_quality)
+    if message.get("renditionUrl"):
+        url_value = validate_url(message["renditionUrl"]).replace('"', '%22')
+        video = f'bv*[url="{url_value}"]'
+        audio_value = validate_url(message["renditionAudioUrl"]).replace('"', '%22')
+        selector = f'{video}+ba[url="{audio_value}"]'
 
     command = [
         ytdlp,
+        "--ignore-config",
         "--newline",
+        "--ffmpeg-location",
+        tool_path("ffmpeg"),
+        "--no-playlist",
         "--continue",
         "--retries",
         "5",
@@ -279,13 +481,19 @@ def build_ytdlp_command(message, target_url, output_dir, output_name):
         "--referer",
         headers.get("referer") or message.get("referer") or page_url or url,
         "-f",
-        quality_selector(selected_quality),
+        selector,
         "-P",
         str(output_dir),
+        "-P",
+        f"temp:{job_temp_dir(output_dir, Path(output_name).stem)}",
         "-o",
-        output_name,
+        output_name.replace("%", "%%"),
     ]
 
+    if message.get("kind") in ("hls_master", "hls_media"):
+        command[command.index("--retries") + 1] = "0"
+        command[command.index("--fragment-retries") + 1] = "2"
+        command.append("--abort-on-unavailable-fragments")
     if auto_cookies:
         command.extend(["--cookies-from-browser", "chrome"])
 
@@ -299,7 +507,7 @@ def build_ytdlp_command(message, target_url, output_dir, output_name):
     accept = headers.get("accept")
     accept_language = headers.get("accept-language")
     if cookie:
-        add_headers.append(f"Cookie: {cookie}")
+        add_headers.append(f"Cookie: {clean_header_value(cookie)}")
     if origin:
         add_headers.append(f"Origin: {origin}")
     if accept:
@@ -315,54 +523,59 @@ def build_ytdlp_command(message, target_url, output_dir, output_name):
 
 
 def matching_files(output_dir, stems, since):
-    results = []
-    for stem in stems:
-        for path in output_dir.glob(f"{stem}*"):
-            if path.is_file() and path.stat().st_mtime >= since - 2:
-                results.append(path)
-    return sorted(set(results), key=lambda item: item.stat().st_mtime, reverse=True)
+    # Literal matching: titles may contain [brackets], which are glob syntax.
+    return [p for p in output_dir.iterdir() if p.is_file() and not p.is_symlink()
+            and any(p.name == stem + ".mp4" or p.name.startswith(stem + ".") for stem in stems)]
 
 
 def exact_mp4_file(output_dir, stem, since):
-    """Return only this job attempt's explicit yt-dlp output target."""
+    # Ownership comes from the fixed job ledger, never filesystem mtime.
     path = output_dir / f"{stem}.mp4"
-    try:
-        if path.is_file() and path.stat().st_mtime >= since - 2:
-            return path
-    except OSError:
-        return None
-    return None
+    return path if path.is_file() and not path.is_symlink() else None
 
 
-def cleanup_sidecars(output_dir, stems, since, keep_path=None):
-    keep = Path(keep_path).resolve() if keep_path else None
-    for path in matching_files(output_dir, stems, since):
-        try:
-            resolved = path.resolve()
-        except OSError:
-            continue
-        if keep and resolved == keep:
-            continue
-        lower_name = path.name.lower()
-        suffix = path.suffix.lower()
-        should_delete = (
-            suffix in SIDE_EXTENSIONS
-            or ".thumbnail." in lower_name
-            or lower_name.endswith(".info.json")
-            or lower_name.endswith(".description")
-            or re.search(r"\.f\d+\.(?:m4a|mp4|webm)$", lower_name) is not None
-        )
-        if should_delete:
+def job_temp_dir(output_dir, stem):
+    return output_dir / ".darren-video-helper" / hashlib.sha256(stem.encode()).hexdigest()[:24]
+
+
+def resume_sidecar(suffix):
+    return re.fullmatch(r"(?:\.f[\w-]+)?\.(?:mp4|m4a|webm)\.(?:part|ytdl)", suffix)
+
+
+def cleanup_sidecars(output_dir, stems, since, keep_path=None, discard_resume=False):
+    removed = []
+    for stem in set(stems):
+        temp = job_temp_dir(output_dir, stem)
+        candidates = matching_files(output_dir, [stem], since)
+        if temp.is_dir() and not temp.is_symlink() and not temp.parent.is_symlink():
+            candidates.extend(matching_files(temp, [stem], since))
+        for path in candidates:
+            suffix = path.name[len(stem):]
+            fragment = re.fullmatch(r"(?:\.f[\w-]+)?\.(?:mp4|m4a|webm)\.part-Frag\d+(?:\.part)?", suffix)
+            success_temp = resume_sidecar(suffix) or re.fullmatch(r"(?:\.f[\w-]+)?\.(?:mp4|m4a|webm)\.(?:temp|tmp)", suffix)
+            intermediate = re.fullmatch(r"\.f[\w-]+\.(?:mp4|m4a|webm)", suffix)
+            disposable = success_temp or intermediate or suffix == ".temp.mp4" or (path.parent == temp and suffix == ".mp4")
+            if not (fragment or ((keep_path or discard_resume) and disposable)):
+                continue
             try:
                 path.unlink()
-            except OSError:
-                pass
+                removed.append(path.name)
+            except OSError as error:
+                LOGGER.warning("cleanup failed basename=%s error=%s", path.name, error)
+        if not temp.parent.is_symlink():
+            for folder in (temp, temp.parent):
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
+    LOGGER.info("cleanup stems=%s success=%s removed=%s", stems, bool(keep_path), removed)
+    return removed
 
 
 def ffprobe_info(path):
-    if not path.exists() or not path.is_file():
-        raise RuntimeError("输出文件不存在。")
-    if path.stat().st_size < 64 * 1024:
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError("输出文件不存在或不是普通文件。")
+    if path.stat().st_size < 32:
         raise RuntimeError("输出文件过小，不能算下载成功。")
     ffprobe = tool_path("ffprobe")
     process = subprocess.run(
@@ -374,30 +587,40 @@ def ffprobe_info(path):
             "json",
             "-show_format",
             "-show_streams",
+            "-show_packets",
+            "-show_entries",
+            "packet=stream_index",
+            "-read_intervals",
+            "%+#128",
             str(path),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         errors="replace",
+        timeout=60,
     )
-    if process.returncode != 0:
+    if process.returncode != 0 or process.stderr.strip():
         raise RuntimeError(process.stderr or process.stdout or "ffprobe failed.")
 
     data = json.loads(process.stdout or "{}")
     video_streams = [
         stream for stream in data.get("streams", [])
-        if stream.get("codec_type") == "video"
+        if stream.get("codec_type") == "video" and not stream.get("disposition", {}).get("attached_pic")
     ]
     if not video_streams:
         raise RuntimeError("输出文件没有 video stream，不能算下载成功。")
 
     video = video_streams[0]
+    if not any(packet.get("stream_index") == video.get("index") for packet in data.get("packets", [])):
+        raise RuntimeError("MP4 开头没有可读取的视频数据。")
     audio_streams = [
         stream for stream in data.get("streams", [])
         if stream.get("codec_type") == "audio"
     ]
     fmt = data.get("format") or {}
+    if not any(x in (fmt.get("format_name") or "").split(",") for x in ("mov", "mp4")):
+        raise RuntimeError("输出容器不是已封装的 MP4。")
     duration = float(fmt.get("duration") or video.get("duration") or 0)
     size = int(fmt.get("size") or path.stat().st_size)
     if duration <= 0.5:
@@ -452,74 +675,201 @@ def remux_to_mp4(job_id, input_path):
     return output_path
 
 
-def validate_final_output(job_id, output_path, expected_duration=0, require_audio=False):
-    suffix = output_path.suffix.lower()
-    if suffix in IMAGE_EXTENSIONS:
+def requires_audio(message):
+    return bool(message.get("renditionAudioUrl") or message.get("kind") == "bilibili_dash")
+
+
+def verify_video_decode(job_id, path, duration):
+    ffmpeg = tool_path("ffmpeg")
+    positions = (0, max(0, duration - min(3, duration * 0.2))) if duration >= 10 else (0,)
+    with job_log(job_id) as record:
+        for position in positions:
+            command = [ffmpeg, "-v", "error", "-xerror", "-nostdin", "-threads", "2",
+                       "-an", "-sn", "-dn", "-ss", str(position), "-i", str(path),
+                       "-map", "0:V:0", "-frames:v", "1", "-progress", "pipe:1", "-f", "null", "-"]
+            for timeout in (15, 45):
+                try:
+                    checked = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
+                                             text=True, errors="replace", timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    record("decode_timeout", position=position, seconds=timeout)
+                    if timeout == 45:
+                        raise OutputValidationTimeout(f"成品已保存，FFmpeg 在 {position:.1f}s 取样两次超时。可重新校验。")
+                    continue
+                record("decode_sample", position=position, exitCode=checked.returncode,
+                       stderr=redacted_output(checked.stderr))
+                if checked.returncode or not re.search(r"^frame=\s*1\s*$", checked.stdout, re.M):
+                    raise RuntimeError(checked.stderr.strip() or f"无法解码 {position:.1f}s 的视频帧。")
+                break
+
+
+def legacy_decode_timeout(error):
+    return "成品视频解码失败" in error and "timed out after 45 seconds" in error
+
+
+def verify_saved_output(job_id, saved, notify=True):
+    legacy_timeout = saved.get("verifyDecode") and legacy_decode_timeout(saved.get("error") or "")
+    if not saved.get("outputPath") or not (saved.get("validationPending") or legacy_timeout):
+        return False
+    target = Path(saved["outputPath"])
+    if target.suffix.lower() != ".mp4" or not target.parent.is_dir():
+        return False
+    existing = exact_mp4_file(target.parent, target.stem, 0)
+    exit_code = saved.get("exitCode")
+    if not existing and legacy_timeout and job_log_path(job_id).is_file():
+        # Older retries renamed the verifiable MP4 before starting another download.
+        prefix = target.stem + ".unverified-"
+        archives = [path for path in target.parent.iterdir()
+                    if path.name.startswith(prefix) and re.fullmatch(r"\d+\.mp4", path.name[len(prefix):])
+                    and path.is_file() and not path.is_symlink()]
+        # Multiple retained outputs are ambiguous. Leave them all available to the user.
+        if len(archives) == 1:
+            existing = archives[0]
+            with job_log_path(job_id).open(encoding="utf-8") as log:
+                successful = set()
+                for line in log:
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    attempt = entry.get("attemptId")
+                    if entry.get("event") == "process_exit" and entry.get("exitCode") == 0:
+                        successful.add(attempt)
+                    if attempt in successful and entry.get("event") == "incomplete" and legacy_decode_timeout(entry.get("error") or ""):
+                        exit_code = 0
+                        break
+
+    if not existing or (saved.get("verifyDecode") and exit_code != 0):
+        return False
+
+    if notify:
+        emit_event({"type": "finalizing", "jobId": job_id, "message": "正在重新校验已下载的 MP4…", "outputPath": str(target)})
+    _, probe = validate_final_output(job_id, existing, saved.get("expectedDuration"), saved.get("requireAudio"),
+                                     saved.get("enforceDuration", False), saved.get("expectedHeight", 0),
+                                     saved.get("verifyDecode", False))
+    if existing != target:
+        os.link(existing, target)
+        existing.unlink()
+    cleanup_sidecars(target.parent, [target.stem], 0, keep_path=target)
+    write_state(job_id, {"exitCode": exit_code})
+    complete(job_id, target, probe, notify=notify)
+    return True
+
+
+def recover_legacy_outputs():
+    recovered = 0
+    for ledger in STATE_DIR.glob("*.json"):
+        if not re.fullmatch(r"[0-9a-f]{64}\.json", ledger.name) or ledger.is_symlink():
+            continue
         try:
-            output_path.unlink()
-        except OSError:
-            pass
-        raise RuntimeError("yt-dlp 输出的是图片，不是视频；已删除该文件。")
+            saved = json.loads(ledger.read_text())
+            if not isinstance(saved, dict):
+                continue
+            job_id = saved.get("jobId")
+            if not job_id or state_path(job_id) != ledger or not legacy_decode_timeout(saved.get("error") or ""):
+                continue
+            with job_lock(job_id):
+                saved = read_state(job_id)
+                if saved.get("status") == "incomplete" and verify_saved_output(job_id, saved, notify=False):
+                    print(f"Recovered verified MP4: {saved['outputPath']}")
+                    recovered += 1
+        except (OSError, ValueError, JobBusy, OutputValidationError) as error:
+            LOGGER.warning("Skipped legacy recovery ledger=%s: %s", ledger.name, error)
+    if recovered:
+        print(f"Recovered {recovered} download(s) from earlier validation timeouts.")
 
-    output_path = remux_to_mp4(job_id, output_path)
+
+def validate_final_output(job_id, output_path, expected_duration=0, require_audio=False, enforce_duration=False, expected_height=0, verify_decode=False):
+    # Never delete a final artifact on validation/tool failure.
     if output_path.suffix.lower() != ".mp4":
-        raise RuntimeError("下载结果不是 MP4，已判定失败。")
-
+        raise OutputValidationError("下载结果不是最终 MP4，文件已保留。")
     try:
         probe = ffprobe_info(output_path)
+    except subprocess.TimeoutExpired as error:
+        write_state(job_id, {"validationPending": True})
+        raise OutputValidationTimeout("成品已保存，ffprobe 读取超时。可重新校验。") from error
     except Exception as error:
-        try:
-            output_path.unlink()
-        except OSError:
-            pass
-        raise RuntimeError(f"输出文件未通过 ffprobe 视频校验：{error}")
-
+        if output_path.is_file():
+            write_state(job_id, {"unverifiedOutput": True, "validationPending": False})
+        raise OutputValidationError(f"MP4 校验未通过，文件已保留；请检查 ffprobe/文件：{error}") from error
     if require_audio and not probe.get("hasAudio"):
-        try:
-            output_path.unlink()
-        except OSError:
-            pass
-        raise RuntimeError("Bilibili DASH 合并结果没有音频，已判定失败。")
-
+        write_state(job_id, {"unverifiedOutput": True, "validationPending": False})
+        raise OutputValidationError("成品没有音频，文件已保留。")
+    if expected_height and probe.get("height") != expected_height:
+        write_state(job_id, {"unverifiedOutput": True, "validationPending": False})
+        raise OutputValidationError(f"成品高度 {probe.get('height', 0)}p 与所选资源 {expected_height}p 不符，文件已保留。")
     expected = float(expected_duration or 0)
     actual = float(probe.get("duration") or 0)
-    if expected >= 10 and (actual < expected * 0.4 or actual > expected * 1.6):
-        LOGGER.warning(
-            "job=%s playable MP4 duration differs from page metadata expected=%.1f actual=%.1f; preserving valid output",
-            job_id,
-            expected,
-            actual,
-        )
+    warnings = []
+    if enforce_duration and expected > 0 and abs(actual - expected) > max(8, expected * 0.15):
+        write_state(job_id, {"unverifiedOutput": True, "validationPending": False})
+        raise OutputValidationError(f"成品时长 {actual:.1f}s 与选定资源 {expected:.1f}s 不符，文件已保留。")
+    if expected > 0 and abs(actual - expected) > max(5, expected * 0.08):
+        warning = f"网页时长与最终 MP4 不一致（网页 {expected:.1f}s，成品 {actual:.1f}s）；以 ffprobe 成品校验为准。"
+        warnings.append(warning)
+        LOGGER.warning("job=%s completed_with_warning duration_mismatch expected=%s actual=%s",
+                       job_id, expected, actual)
+    if verify_decode:
+        try:
+            verify_video_decode(job_id, output_path, actual)
+        except OutputValidationTimeout:
+            write_state(job_id, {"validationPending": True})
+            raise
+        except OSError as error:
+            write_state(job_id, {"validationPending": True})
+            raise OutputValidationTimeout("成品已保存，FFmpeg 无法启动。请检查安装后重新校验。") from error
+        except RuntimeError as error:
+            write_state(job_id, {"unverifiedOutput": True, "validationPending": False})
+            raise OutputValidationError(f"成品视频解码失败，文件已保留。{error}") from error
+    probe["warnings"] = warnings
+    probe["warningCount"] = len(warnings)
+    LOGGER.info("job=%s final_exists=true basename=%s size=%s ffprobe=ok duration=%s expected=%s",
+                job_id, output_path.name, probe.get("fileSize"), actual, expected)
     return output_path, probe
 
 
+def cookie_store_failed(output):
+    return bool(re.search(
+        r"(?im)^ERROR:.*(?:cookies? database|could not copy chrome cookie|failed to decrypt|CookieLoadError)",
+        output or "",
+    ))
+
+
+def http_failure_status(output):
+    failures = re.findall(r"(?:HTTP(?: Error)?[ :]+|server returned[ :]+)([45]\d\d)\b", output or "", re.I)
+    return int(failures[-1]) if failures else None
+
+
 def classify_failure(output, fallback="下载失败。"):
-    text = (output or "").lower()
-    if "requested format is not available" in text:
-        return "站点不支持或 yt-dlp 无法解析当前页面/视频流。"
-    if (
-        "ffmpeg: command not found" in text
-        or "unable to execute ffmpeg" in text
-        or "no such file or directory: 'ffmpeg'" in text
-        or "no such file or directory: 'ffmpeg.exe'" in text
-    ):
-        return "yt-dlp、ffmpeg 或 ffprobe 缺失。请重新安装 Darren Video Helper。"
-    if (
-        "yt-dlp: command not found" in text
-        or "no such file or directory: 'yt-dlp'" in text
-        or "no such file or directory: 'yt-dlp.exe'" in text
-    ):
-        return "yt-dlp、ffmpeg 或 ffprobe 缺失。请重新安装 Darren Video Helper。"
-    if "could not copy chrome cookie" in text or "failed to decrypt" in text or "cookie database" in text:
-        return "cookies 读取失败。请退出 Chrome 后重试，或确认 yt-dlp 有权限读取 Chrome cookies。"
-    if "403" in text or "forbidden" in text or "http error 403" in text:
-        return "403/链接过期。请刷新页面、播放视频 3-5 秒后重试。"
-    if "drm" in text or "widevine" in text or "license" in text or "encrypted" in text:
-        return "DRM/加密流无法下载。"
-    if "cookie" in text and ("expired" in text or "login" in text or "authentication" in text):
-        return "cookies 读取失败或登录已过期。请重新登录、播放视频后重试。"
-    if "unsupported url" in text or "no video formats" in text or "unable to extract" in text:
-        return "站点不支持或 yt-dlp 无法解析当前页面/视频流。"
+    output = output or ""
+    errors = [line.strip() for line in output.splitlines() if line.lstrip().startswith("ERROR:")]
+    text = "\n".join(errors).lower() if errors else output.lower()
+    if cookie_store_failed(output):
+        return "本地助手无法读取 Chrome Cookie 数据库。请在原页面重新播放后重试。"
+    if re.search(r"\bdrm(?:[- ]protected)?\b|widevine|fairplay|playready|unsupported encryption", text):
+        return "此媒体使用 DRM 或不受支持的加密，无法下载。"
+    status = http_failure_status(text)
+    http_messages = {
+        401: "服务器要求授权（HTTP 401）。请确认你能在原页面播放该视频。",
+        403: "服务器拒绝媒体请求（HTTP 403）。请确认播放权限及当前链接是否仍有效。",
+        404: "服务器找不到媒体资源（HTTP 404）。请重新播放并检测。",
+        410: "媒体链接已过期（HTTP 410）。请重新播放并检测。",
+        429: "服务器限制请求频率（HTTP 429）。请稍后重试。",
+    }
+    if status:
+        return http_messages.get(status, f"媒体服务器请求失败（HTTP {status}）。")
+    if re.search(r"timed out|timeout|connection reset|remote end closed|connection refused|"
+                 r"temporary failure|name resolution|nodename nor servname|network is unreachable", text):
+        return "网络连接失败或超时，请稍后重试。"
+    if any(marker in text for marker in ("ffmpeg: command not found", "unable to execute ffmpeg", "no such file or directory: 'ffmpeg")):
+        return "ffmpeg 无法运行，请检查本地安装。"
+    if any(marker in text for marker in ("requested format is not available", "unsupported url", "no video formats", "unable to extract")):
+        return "yt-dlp 无法解析当前视频流或所选格式。"
+    if errors:
+        return errors[-1][:360]
+    exit_code = re.search(r"yt-dlp exited with code (-?\d+)", output)
+    if exit_code:
+        return f"yt-dlp 退出（退出码 {exit_code.group(1)}），未生成有效的 MP4。"
     return fallback
 
 
@@ -544,6 +894,14 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
     output_name = f"{stem}.mp4"
     expected_output_path = output_dir / output_name
     command = build_ytdlp_command(message, target_url, output_dir, output_name)
+    temp = job_temp_dir(output_dir, stem)
+    if temp.is_symlink() or temp.parent.is_symlink():
+        raise OSError("下载临时目录是符号链接。")
+    temp.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for path in matching_files(output_dir, [stem], 0):
+        destination = temp / path.name
+        if resume_sidecar(path.name[len(stem):]) and not (destination.exists() or destination.is_symlink()):
+            path.rename(destination)
     started_at = time.time()
 
     progress(job_id, f"{label}：调用 yt-dlp 下载并合并为 MP4...")
@@ -551,108 +909,137 @@ def run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, label):
     last_progress_sent = 0.0
     process = None
 
-    try:
-        LOGGER.info("job=%s yt-dlp command=%s", job_id, json.dumps(redacted_command(command), ensure_ascii=False))
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-        )
-        LOGGER.info("job=%s yt-dlp started pid=%s", job_id, process.pid)
+    return_code = None
+    pending = queue.Queue()
+    readers = []
+    with job_log(job_id) as record:
+        record("process_start", command=redacted_command(command), toolVersions=TOOL_VERSIONS)
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+                start_new_session=(os.name != "nt"),
+            )
+            LOGGER.info("job=%s yt-dlp started pid=%s", job_id, process.pid)
 
-        assert process.stdout is not None
-        for line in process.stdout:
-            output_lines.append(line)
-            sys.stderr.write(line)
-            sys.stderr.flush()
+            def drain(source, pipe):
+                try:
+                    for line in pipe:
+                        pending.put((source, line))
+                finally:
+                    if hasattr(pipe, "close"):
+                        pipe.close()
+                    pending.put((source, None))
 
-            percent, speed, eta = parse_progress_line(line)
-            stage = "merging" if re.search(
-                r"\[(?:Merger|FixupM3u8|VideoRemuxer)\]|merging formats|remuxing video",
-                line,
-                re.IGNORECASE,
-            ) else "downloading"
-            now = time.time()
-            if percent and now - last_progress_sent >= 0.5:
-                last_progress_sent = now
-                progress(
-                    job_id,
-                    f"下载中... {percent}%",
-                    percent=percent,
-                    speed=speed,
-                    eta=eta,
-                    line=line,
-                    stage=stage,
-                )
-            elif now - last_progress_sent >= 1.8:
-                last_progress_sent = now
-                progress(
-                    job_id,
-                    line.strip()[:240] or "yt-dlp 正在处理...",
-                    line=line,
-                    stage=stage,
-                )
+            pipes = {"stdout": process.stdout, "stderr": getattr(process, "stderr", None)}
+            active = {source for source, pipe in pipes.items() if pipe is not None}
+            readers = [threading.Thread(target=drain, args=(source, pipes[source]), daemon=True) for source in active]
+            for reader in readers:
+                reader.start()
 
-        return_code = process.wait()
-        LOGGER.info("job=%s yt-dlp exited code=%s", job_id, return_code)
-    except NativePipeClosed:
-        LOGGER.warning("job=%s native pipe closed while yt-dlp was running", job_id)
-        if process and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        raise
+            last_output = time.monotonic()
+            while active:
+                if os.name != "nt" and NATIVE_INPUT is not None and select.select([NATIVE_INPUT], [], [], 0)[0]:
+                    # A download owns its port. Chrome closes stdin on cancellation.
+                    if not NATIVE_INPUT.peek(1):
+                        raise NativePipeClosed("Chrome disconnected during download.")
+                try:
+                    source, line = pending.get(timeout=0.25)
+                except queue.Empty:
+                    if time.monotonic() - last_output >= DOWNLOAD_IDLE_TIMEOUT:
+                        raise DownloadTimedOut(f"yt-dlp produced no output for {DOWNLOAD_IDLE_TIMEOUT}s (timeout).")
+                    continue
+                if line is None:
+                    active.remove(source)
+                    continue
+                last_output = time.monotonic()
+                line = redacted_output(line)
+                record(source, line=line)
+                # Progress stays out of the failure tail while remaining available in the full log.
+                if not line.lstrip().startswith("[download]") or re.search(r"error|fail|timed out", line, re.I):
+                    output_lines.append(line)
+                    if len(output_lines) > 300:
+                        del output_lines[0]
+                percent, speed, eta = parse_progress_line(line)
+                stage = "merging" if re.search(
+                    r"\[(?:Merger|FixupM3u8|VideoRemuxer)\]|merging formats|remuxing video", line, re.I
+                ) else "downloading"
+                now = time.monotonic()
+                if source == "stdout" and percent and now - last_progress_sent >= 0.5:
+                    last_progress_sent = now
+                    progress(job_id, f"下载中... {percent}%", percent=percent,
+                             speed=speed, eta=eta, line=line, stage=stage)
+                elif source == "stdout" and not line.lstrip().startswith("WARNING:") and now - last_progress_sent >= 1.8:
+                    last_progress_sent = now
+                    progress(job_id, line.strip()[:240] or "yt-dlp 正在处理...", line=line, stage=stage)
+
+            return_code = process.wait(timeout=5) if hasattr(process, "poll") else process.wait()
+        except (DownloadTimedOut, subprocess.TimeoutExpired, OSError) as error:
+            stop_process(process)
+            return_code = process.returncode if process else None
+            error_line = redacted_output(f"ERROR: {error}\n")
+            record("process_error", line=error_line)
+            output_lines.append(error_line)
+        except BaseException as error:
+            stop_process(process)
+            return_code = process.returncode if process else None
+            record("process_interrupted", reason=str(error))
+            cleanup_sidecars(output_dir, [stem], started_at)
+            if isinstance(error, NativePipeClosed):
+                write_state(job_id, {"status": "incomplete", "message": "下载中断；已清理分片，可重试。"})
+            raise
+        finally:
+            # The child has exited. Preserve any last lines buffered during cancellation.
+            for reader in readers:
+                reader.join(timeout=0.25)
+            while not pending.empty():
+                source, line = pending.get_nowait()
+                if line is not None:
+                    record(source, line=redacted_output(line))
+            record("process_exit", exitCode=return_code)
+            write_state(job_id, {"exitCode": return_code})
+            LOGGER.info("job=%s yt-dlp exited code=%s", job_id, return_code)
 
     combined_output = "".join(output_lines)
     output_path = exact_mp4_file(output_dir, stem, started_at)
     if output_path:
-        try:
-            ffprobe_info(output_path)
-        except Exception as error:
-            LOGGER.warning("job=%s invalid MP4 candidate=%s error=%s", job_id, output_path, error)
-            combined_output += f"\nMP4 candidate failed ffprobe validation: {error}"
-            try:
-                output_path.unlink()
-            except OSError:
-                pass
-            output_path = None
-        else:
-            if return_code != 0:
-                LOGGER.warning(
-                    "job=%s yt-dlp exited code=%s after producing a valid MP4; treating verified file as complete",
-                    job_id,
-                    return_code,
-                )
-                progress(
-                    job_id,
-                    "yt-dlp 末尾报错，但完整 MP4 已通过 ffprobe；按下载完成处理。",
-                    percent="100",
-                    stage="merging",
-                )
-            return output_path, combined_output, started_at
-
-    if not output_path:
-        LOGGER.info(
-            "job=%s no valid exact output at path=%s; refusing fuzzy MP4 recovery",
-            job_id,
-            expected_output_path,
-        )
-        created = matching_files(output_dir, [stem], started_at)
-        for path in created:
-            if path.suffix.lower() in IMAGE_EXTENSIONS:
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
+        if return_code != 0 and message.get("exactSelection"):
+            write_state(job_id, {"unverifiedOutput": True, "validationPending": False})
+            raise OutputValidationError(f"yt-dlp 退出码为 {return_code}，无法确认所选资源完整。文件已保留。")
+        emit_event({"type": "finalizing", "event": "finalizing", "jobId": job_id,
+                    "message": "正在校验最终 MP4…", "outputPath": str(output_path)})
+        _, probe = validate_final_output(job_id, output_path, message.get("expectedDuration") or 0,
+                                        requires_audio(message), message.get("enforceDuration", False),
+                                        message.get("expectedHeight", 0))
+        if return_code != 0 and probe["warningCount"] and message.get("kind") in ("hls_master", "hls_media"):
+            write_state(job_id, {"unverifiedOutput": True})
+            raise OutputValidationError("yt-dlp 失败，成品与预期时长不符。文件已保留，可重试。")
         if return_code != 0:
-            combined_output += f"\nyt-dlp exited with code {return_code} and no valid MP4 was found."
-        else:
-            combined_output += "\nDownload finished, but no valid MP4 video output was found."
-        return None, combined_output, started_at
+            progress(job_id, "末尾报错，但最终 MP4 已通过校验。", percent="100", stage="merging")
+        return output_path, combined_output, started_at
+
+    LOGGER.info("job=%s final_exists=false output=%s", job_id, expected_output_path)
+    if return_code is not None and return_code != 0:
+        combined_output += f"\nyt-dlp exited with code {return_code} and no valid MP4 was found."
+    else:
+        combined_output += "\nDownload finished, but no valid MP4 video output was found."
+    return None, combined_output, started_at
+
+
+def expired_media_status(output):
+    status = http_failure_status(output)
+    return status if status in (403, 410) else None
+
+
+def media_url_diagnostics(url):
+    parsed = urlsplit(url)
+    expiry = {key: value if value.isdigit() else "present" for key, value in parse_qsl(parsed.query)
+              if key.lower() in ("e", "exp", "expire", "expires", "expiry")}
+    return {"host": parsed.hostname, "expiry": expiry,
+            "urlHash": hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]}
 
 
 def is_retryable_failure(output):
@@ -676,6 +1063,7 @@ def is_retryable_failure(output):
 def run_ytdlp_with_retries(job_id, message, target_url, output_dir, stem, label, attempts=2):
     combined = []
     earliest_started_at = time.time()
+    allow_cookie_fallback = (message.get("settings") or {}).get("autoCookies", True) and message.get("kind") not in ("hls_master", "hls_media", "mp4", "webm")
     for attempt in range(1, max(1, attempts) + 1):
         attempt_label = label if attempts == 1 else f"{label}（尝试 {attempt}/{attempts}）"
         output_path, output, started_at = run_ytdlp_attempt(
@@ -690,7 +1078,17 @@ def run_ytdlp_with_retries(job_id, message, target_url, output_dir, stem, label,
         combined.append(output)
         if output_path:
             return output_path, "\n".join(combined), earliest_started_at
-        if attempt >= attempts or not is_retryable_failure(output):
+        if allow_cookie_fallback and cookie_store_failed(output):
+            allow_cookie_fallback = False
+            progress(job_id, "无法读取 Chrome Cookie，正在尝试使用页面已捕获的请求上下文…")
+            message = {**message, "settings": {**(message.get("settings") or {}), "autoCookies": False}}
+            output_path, output, _ = run_ytdlp_attempt(job_id, message, target_url, output_dir, stem, "页面请求上下文")
+            combined.append(output)
+            if output_path:
+                return output_path, "\n".join(combined), earliest_started_at
+            # Keep all attempts on disk and classify the actual request failure after fallback.
+            combined = [output]
+        if http_failure_status(output) in (401, 403, 404, 410) or attempt >= attempts or not is_retryable_failure(output):
             break
         progress(job_id, f"网络或 HLS 分片暂时失败，准备重试 {attempt + 1}/{attempts}...")
         time.sleep(min(2, attempt))
@@ -810,11 +1208,28 @@ def run_download(message):
         output_dir,
     )
 
-    page_title = message.get("pageTitle") or message.get("sourceTitle") or "video"
-    stem = sanitize_filename(page_title)
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    job_suffix = sanitize_filename(job_id).replace("job ", "").replace("job:", "")[:8]
-    stem = f"{stem} {timestamp} {job_suffix}".strip()
+    LOGGER.info("job=%s url_lifecycle detectedAt=%s downloadStartedAt=%s context=%s beforeHash=%s afterHash=%s",
+                job_id, message.get("detectedAt"), message.get("downloadStartedAt") or int(time.time() * 1000),
+                json.dumps(media_url_diagnostics(message.get("url") or "")),
+                message.get("refreshBeforeHash"), message.get("refreshAfterHash"))
+    title = message.get("sourceTitle") or message.get("pageTitle") or "video"
+    stem = sanitize_filename(title)
+    saved = read_state(job_id)
+    if verify_saved_output(job_id, saved):
+        return
+    if saved.get("outputPath"):
+        output_path = Path(saved["outputPath"])
+        output_dir, stem = output_path.parent, output_path.stem
+    else:
+        stem = f"{stem.encode('utf-8')[:160].decode('utf-8', errors='ignore')} {hashlib.sha256(job_id.encode()).hexdigest()[:24]}"
+    write_state(job_id, {"outputPath": str(output_dir / (stem + ".mp4")),
+                         "expectedDuration": message.get("expectedDuration") or 0,
+                         "enforceDuration": message.get("enforceDuration", False),
+                         "expectedHeight": message.get("expectedHeight", 0),
+                         "verifyDecode": message.get("exactSelection", False),
+                         "requireAudio": requires_audio(message)})
+    emit_event({"type": "download_started", "event": "download_started", "jobId": job_id,
+                "outputPath": str(output_dir / (stem + ".mp4")), "message": "开始下载或续传…"})
 
     progress(job_id, "Checking yt-dlp, ffmpeg and ffprobe...")
     tool_path("yt-dlp")
@@ -822,11 +1237,29 @@ def run_download(message):
     tool_path("ffprobe")
 
     stream_url = validate_url(message.get("url"))
+    if message.get("renditionMasterUrl"):
+        stream_url = validate_url(message["renditionMasterUrl"])
+        message = {**message, "headers": message.get("renditionMasterHeaders") or {}}
+
     page_url = message.get("pageUrl") or ""
     kind = message.get("kind") or ""
     prefer_page = bool(message.get("preferPageUrl"))
 
+    existing = exact_mp4_file(output_dir, stem, 0)
+    if existing and (saved.get("unverifiedOutput") or saved.get("verifyDecode") and saved.get("exitCode") not in (None, 0)):
+        preserved = existing.with_name(f"{existing.stem}.unverified-{time.time_ns()}.mp4")
+        existing.rename(preserved)
+        write_state(job_id, {"unverifiedOutput": False, "validationPending": False})
+        existing = None
+    if existing:
+        existing, probe = validate_final_output(job_id, existing, message.get("expectedDuration") or 0,
+                                                requires_audio(message), message.get("enforceDuration", False),
+                                        message.get("expectedHeight", 0), message.get("exactSelection", False))
+        cleanup_sidecars(output_dir, [stem], 0, keep_path=existing)
+        complete(job_id, existing, probe)
+        return
     output_path = None
+    write_state(job_id, {"exitCode": None, "validationPending": False})
     first_output = ""
     first_started_at = time.time()
     first_target = page_url if (prefer_page or kind == "segment") and page_url else stream_url
@@ -844,8 +1277,29 @@ def run_download(message):
             first_target,
             output_dir,
             stem,
-            "第一步"
+            "第一步",
+            attempts=1 if message.get("refreshAttempt") else 2
         )
+
+    if not output_path and message.get("exactSelection") and kind in ("hls_master", "hls_media") and expired_media_status(first_output):
+        cleanup_sidecars(output_dir, [stem], first_started_at, discard_resume=True)
+        incomplete(job_id, classify_failure(first_output) + " 请刷新检测后重新选择该资源。", first_output[-8000:])
+        return
+
+    if not output_path and kind in ("hls_master", "hls_media") and expired_media_status(first_output):
+        status = expired_media_status(first_output)
+        cleanup_sidecars(output_dir, [stem], first_started_at, discard_resume=True)
+        LOGGER.warning("job=%s media_url_expired status=%s detectedAt=%s downloadStartedAt=%s context=%s refreshAttempt=%s",
+                       job_id, status, message.get("detectedAt"), message.get("downloadStartedAt"),
+                       json.dumps(media_url_diagnostics(first_target)), message.get("refreshAttempt", 0))
+        if message.get("refreshAttempt", 0) >= 1:
+            incomplete(job_id, "重新获取链接后仍失败。" + classify_failure(first_output))
+        else:
+            write_state(job_id, {"status": "incomplete", "message": "等待新媒体链接以续传。"})
+            send_message({"type": "refresh_required", "jobId": job_id, "status": status,
+                          "exitCode": read_state(job_id).get("exitCode"), "details": classify_failure(first_output),
+                          "message": "正在重新检测播放器的 HLS 链接…"})
+        return
 
     used_stems = [stem]
     allow_page_fallback = message.get("allowPageFallback") is True
@@ -856,7 +1310,7 @@ def run_download(message):
         and (page_url != first_target or kind == "bilibili_dash")
     ):
         progress(job_id, "视频流 URL 失败，回退使用当前页面 URL...")
-        fallback_stem = f"{stem} page"
+        fallback_stem = stem
         used_stems.append(fallback_stem)
         output_path, second_output, second_started_at = run_ytdlp_with_retries(
             job_id,
@@ -876,13 +1330,21 @@ def run_download(message):
 
     if not output_path:
         cleanup_sidecars(output_dir, used_stems, first_started_at)
+        temp = job_temp_dir(output_dir, stem)
+        if any(resume_sidecar(p.name[len(stem):]) for p in matching_files(output_dir, [stem], 0)
+               + (matching_files(temp, [stem], 0) if temp.is_dir() else [])):
+            incomplete(job_id, "未完成，可重试/续传。" + classify_failure(first_output), first_output[-8000:])
+            return
         raise RuntimeError(classify_failure(first_output) + "\n\n" + first_output[-8000:])
 
     output_path, probe = validate_final_output(
         job_id,
         output_path,
         expected_duration=message.get("expectedDuration") or 0,
-        require_audio=kind == "bilibili_dash",
+        require_audio=requires_audio(message),
+        enforce_duration=message.get("enforceDuration", False),
+        expected_height=message.get("expectedHeight", 0),
+        verify_decode=message.get("exactSelection", False),
     )
     cleanup_sidecars(output_dir, used_stems, first_started_at, keep_path=output_path)
     complete(job_id, output_path, probe)
@@ -897,27 +1359,21 @@ def run_download(message):
     )
 
 
-def handle_message(message):
+def guarded_download(message):
     job_id = message.get("jobId") or "job"
-    action = message.get("action")
-    LOGGER.info("received action=%s job=%s", action or "", job_id)
     try:
-        if action == "ping":
-            send_message({
-                "type": "pong",
-                "jobId": job_id,
-                "ok": True,
-                "version": HOST_VERSION,
-                "logPath": str(LOG_PATH),
-            })
-            return True
-        if action != "download":
-            raise RuntimeError("Unknown native host action.")
         run_download(message)
         return True
     except NativePipeClosed:
         LOGGER.warning("job=%s response pipe closed", job_id)
         return False
+    except OutputValidationError as error:
+        saved = read_state(job_id)
+        path = Path(saved.get("outputPath") or "")
+        if path.parent.is_dir() and saved.get("outputPath"):
+            cleanup_sidecars(path.parent, [path.stem], 0)
+        incomplete(job_id, str(error))
+        return True
     except FileNotFoundError as error:
         missing = str(error)
         LOGGER.exception("job=%s required tool missing: %s", job_id, missing)
@@ -937,8 +1393,75 @@ def handle_message(message):
         return True
 
 
+def handle_message(message):
+    job_id = message.get("jobId") or "job"
+    action = message.get("action")
+    LOGGER.info("received action=%s job=%s", action or "", job_id)
+    try:
+        if action == "ping":
+            send_message({
+                "type": "pong",
+                "jobId": job_id,
+                "ok": True,
+                "version": HOST_VERSION,
+                "logPath": str(LOG_PATH),
+            })
+            return True
+        if action == "diagnostics":
+            page = diagnostic_page(job_id, max(0, int(message.get("offset") or 0)))
+            send_message({"type": "job_diagnostics", "jobId": job_id, **page})
+            return True
+        if action == "status":
+            saved = read_state(job_id)
+            active = False
+            try:
+                with job_lock(job_id):
+                    saved = read_state(job_id)
+                    # Query never removes media or starts a downloader.
+                    if saved and saved.get("status") != "completed":
+                        path = Path(saved.get("outputPath") or "")
+                        can_verify = not (saved.get("unverifiedOutput") or saved.get("validationPending")
+                                          or legacy_decode_timeout(saved.get("error") or ""))
+                        successful_exit = (
+                            not saved.get("verifyDecode") or "exitCode" not in saved or saved.get("exitCode") == 0
+                            or saved.get("status") == "finalizing" and saved.get("exitCode") is None
+                        )
+                        if can_verify and successful_exit and (path.is_file() or saved.get("status") not in ("failed", "incomplete")):
+                            try:
+                                _, probe = validate_final_output(job_id, path, saved.get("expectedDuration"),
+                                                                 saved.get("requireAudio"), saved.get("enforceDuration", False),
+                                                                 saved.get("expectedHeight", 0), saved.get("verifyDecode", False))
+                                saved = write_state(job_id, {**probe, "status": "completed", "message": "已校验最终 MP4。",
+                                                             "error": "", "details": ""})
+                            except Exception as error:
+                                saved = write_state(job_id, {"status": "incomplete", "message": str(error)})
+            except JobBusy:
+                active = True
+            send_message({"type": "job_status", "jobId": job_id, "state": saved, "active": active})
+            return True
+        if action != "download":
+            raise RuntimeError("Unknown native host action.")
+        with job_lock(job_id):
+            JOB_CONTEXT[job_id] = {"attemptId": message.get("attemptId") or str(time.time_ns())}
+            write_state(job_id, {"currentAttemptId": JOB_CONTEXT[job_id]["attemptId"]})
+            TERMINAL_JOB_TYPES.pop(job_id, None)
+            return guarded_download(message)
+    except JobBusy as error:
+        send_message({"type": "incomplete", "jobId": job_id, "message": str(error), "active": True})
+        return True
+    except NativePipeClosed:
+        return False
+    except Exception as error:
+        fail(job_id, str(error))
+        return True
+
+
 def main():
+    global NATIVE_INPUT
     setup_logging()
+    def interrupted(_signum, _frame):
+        raise NativePipeClosed("Native host stopped")
+    signal.signal(signal.SIGTERM, interrupted)
     LOGGER.info(
         "host start version=%s pid=%s ppid=%s executable=%s frozen=%s cwd=%s",
         HOST_VERSION,
@@ -955,12 +1478,17 @@ def main():
             "yt-dlp": tool_path("yt-dlp"),
             "ffmpeg": tool_path("ffmpeg"),
             "ffprobe": tool_path("ffprobe"),
+            "toolVersions": TOOL_VERSIONS,
             "outputDir": str(DEFAULT_OUTPUT_DIR),
             "logPath": str(LOG_PATH),
         }))
         LOGGER.info("host exit reason=self-test")
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "--recover-legacy-outputs":
+        recover_legacy_outputs()
+        return
 
+    NATIVE_INPUT = sys.stdin.buffer
     try:
         while True:
             message = read_message()
@@ -973,6 +1501,8 @@ def main():
     except Exception as error:
         LOGGER.exception("host fatal framing error: %s", error)
         LOGGER.info("host exit reason=fatal-framing-error")
+    finally:
+        NATIVE_INPUT = None
 
 
 if __name__ == "__main__":

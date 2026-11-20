@@ -1,28 +1,16 @@
-# Darren Video Helper macOS Beta 安装说明
+# Darren Video Helper v1.2.1-beta.15
 
-当前版本：`v1.2.0-beta.3`（预发布版，仅验证 macOS）
+弹窗列出当前标签页已发现的 HLS 清单和变体、MP4、WebM。使用顶部下拉菜单按大小、时长或清晰度排序。广告和预览片默认折叠。每条下载对应那一行的资源地址。HLS 主清单是可包含多个清晰度的入口，下载按钮选择清单内的最佳可用版本。要指定清晰度，请点对应变体的下载按钮。
 
-Chrome 不允许普通脚本静默安装未上架的扩展。因此安装器会自动完成 Native Host、权限和工具链自检，Chrome 扩展本身仍需手动“加载未打包的扩展程序”。这是 Chrome 的安全限制，不是安装器故障。
+有清单实测时长和播放器证据时才推荐主视频。HLS 大小使用已观察分片或清单码率估算。缺少数据时显示“大小未知”。有访问或绑定缺口时查看“采集情况”及“导出诊断”。
 
-## 最简安装（4 步）
+## 在本机安装或升级
 
-1. 解压整个 `DarrenVideoHelper-macOS-v1.2.0-beta.3.zip`，不要只单独取出某个文件。
-2. 确认已安装 Homebrew `yt-dlp`。若没有，请在“终端”运行 `brew install yt-dlp`。
-3. 双击 `install.command`；若 macOS 首次阻止打开，请右键它并选择“打开”。等待窗口显示 Native Host 自检通过。
-4. 在自动打开的 `chrome://extensions/` 中启用“开发者模式”，点击“加载未打包的扩展程序”，选择同一解压目录里的 `extension` 文件夹。
+1. 解压 ZIP。已有 Homebrew 安装的 yt-dlp 和 ffmpeg 可以直接继续。缺少时运行 `brew install yt-dlp ffmpeg`。随包的 ffmpeg 和 ffprobe 需要本机 Homebrew 的媒体库。
+2. 双击 `install.command`，等待 `Native-host self-test passed.`。
+3. 保留当前加载的扩展目录，把新版 `extension` 内容覆盖进去，然后打开 `chrome://extensions` 点击重新加载。新安装则选择“加载未打包的扩展程序”，指向新版的 `extension`。受 Chrome 的安全限制，加载扩展需要在浏览器中手动完成。
+4. 刷新已打开的网页后开始播放，让新版从页面启动起采集。确认弹窗版本为 beta.15。
 
-安装后请保留整个解压目录，不要移动 `extension` 文件夹；Chrome 会从该固定位置加载它。安装器不会替换或移除你已经加载的其他扩展。
+安装时会复查旧版因解码校验超时而标记失败的成品。复查成功后只清理属于该任务的临时文件。新版把续传文件保存在输出目录内的隐藏子目录，任务校验通过后清理。
 
-## 安装器会做什么
-
-- 安装源码版 Native Host，并通过 `/usr/bin/python3` 启动；
-- 使用 Homebrew `yt-dlp` 与包内的 `ffmpeg` / `ffprobe`；
-- 设置执行权限、注册 Chrome Native Messaging Host 并运行强制自检；
-- 打开 Chrome 扩展管理页和 Finder 中的 `extension` 文件夹，提示最后一步。
-
-本包不包含旧的 PyInstaller / Python.framework Host，也不会绕过 Chrome 的扩展安装安全策略。
-
-## 卸载
-
-双击 `uninstall.command` 移除 Native Host 注册，然后在 `chrome://extensions/` 中移除扩展。
-
+选中的媒体地址失效时，刷新源网页的播放状态和弹窗资源列表，再选择更新的地址。扩展保存任务的完整进程诊断，导出时隐去 Cookie 和已知签名参数。

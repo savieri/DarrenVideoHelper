@@ -1,0 +1,32 @@
+{
+  "archive_sha256": "07c188358e0a025234ade47fd8ba6e24813817fe2b07cd573b3dd9b583a7c247",
+  "files": {
+    "install.command": "54f948f638f3644e6b4bf2b2900b9829569fe3741e4519d1f2e6e72fe3ef21dc",
+    "uninstall.command": "e80a75c1ee2f47af57f29fb65754b3cc24a00077c07c317f3f8bb292b603693a",
+    "LICENSE": "9628094c0fba3c5faebad865d38d3bacbeb059e38f79298e0ef2b6de9fa1972e",
+    "CHANGELOG.md": "db545831ed1770577a5d4a63d69514554670879de0881c0897b6b52cf1a9735f",
+    "VALIDATION.md": "4932d0644755ae107ff88a56c9f3b2e92765c833619e8bed5ca54b6ded0886fa",
+    "README.md": "982149ef2dc00176f4d60854b233b3201b5a62c6f0c3ba2aa3db74255407cf23",
+    "README-FIRST.md": "54fa7a7ba6dd44d2fb3a6e318e8725f9322cae1550983cfd9b7fbbc5823cb520",
+    "extension/popup.js": "af2abbe95b33b49aaa57a16778c6b94ceddf15d19b4620c148975861b9bc6003",
+    "extension/page-navigation.js": "10a0e9d7984d95a51b3ed787db728acded252d56ffeb8abfa0b03c8ab607807a",
+    "extension/background.js": "e3edf22c78f6131c9c5131f9481c741e6aa94e9aaf6dcfe415b7f6a90f9dd4bb",
+    "extension/popup.html": "c0dcc40aa5cacb4404e1c2ff5eb4b7b7f3cfc72edcc6b05fc74ebcead7f1fc8c",
+    "extension/options.js": "deb75ae12664a5a85c91faab6fd13f67de58749288e67b030c7b358b681f281e",
+    "extension/media-observer.js": "63371b01006deca7ef35b2b1bec961e977663bf41c35cf126bf8c41528fdbd1f",
+    "extension/style.css": "159d5300bb85b40bbe16b9f0786280ff1ff0c2633108cc8756695bc23d91b6ec",
+    "extension/manifest.json": "02159bfdb02144babe089dc377ee72a496ec53da84d708f29c058677a1880dd3",
+    "extension/options.html": "99269a3519df2e324a57f31f3113bfaccd4b59a656b3dd3ffc1c2f520042197b",
+    "extension/content.js": "76032c8ad3a4ccd56902d5ec7baede870aac9753867a60ba5d9db43a8bcc9903",
+    "extension/media-bridge.js": "855f1c063965c924aebde692f0fb0d06e2683b2d0e216cf08aac01a5a3e4aab4",
+    "extension/options.css": "a9014e41ad08e0eaa6e490087dea4887608398a69543f4c00ed52f829f03b2c4",
+    "native/host.py": "623ea5c9c8fa8af8673ebd27f161a7b74d29357cfb891f5f2ecc68ffedcdf2b7",
+    "scripts/sync-dev-install.command": "898d54529932037ae303a2d239df030a781ff179653cd57b1518b644501400b4",
+    "native/bin/ffmpeg": "1ede5c7fd4e97d832ec69c97c78231875de7d69c55423158f5f4a4d923227dd5",
+    "native/bin/ffprobe": "258fa480850eec6cf7b6831b2d3edd164cdd2f9ddb7a14965dc9fdaf9d175ff7",
+    "extension/icons/icon16.png": "6c4c90e2ea2f049db8ed6b4c92bda034099143e75cd9bdc9d57088830ba6f6c2",
+    "extension/icons/icon48.png": "2aea3366b749e62ca2733231507266785fae12e8dfaeac5f27a2e7da66cd7cf4",
+    "extension/icons/icon128.png": "079ad0c6fa35cd12a74e87f5543abd4291779c99374a6a751a7f1addd2431a68",
+    "extension/icons/icon32.png": "85a14673677ef202563efa6ea6f59d29c33b6b0129955eb1b8c5fcf298ca12da"
+  }
+}
