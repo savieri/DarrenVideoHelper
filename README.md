@@ -1,213 +1,100 @@
-# Darren Video Helper
+# DarrenVideoHelper
 
-Universal Web Video Downloader for Chrome.
+Detect video resources in the current tab and download direct MP4/WebM files in Chrome. The optional **macOS Full** edition keeps the beta.15 Native Messaging + yt-dlp + FFmpeg pipeline for HLS, DASH and supported site extractors.
 
-Darren Video Helper detects browser-playable non-DRM HLS/MP4 video streams, sends the selected item to a local Native Messaging host, downloads with `yt-dlp`, merges/remuxes with `ffmpeg`, and accepts the result only after `ffprobe` confirms a real video stream in an MP4 file.
+[中文安装指南](README.zh-CN.md) · **v1.2.1-beta.16 — public prerelease**
 
-It does not decrypt DRM, bypass paywalls, bypass login, or defeat site access controls. Use it only for videos your browser can already play and that you are allowed to download.
+![Popup rendered from the actual extension HTML, CSS and JavaScript with sample test data](docs/images/popup.png)
 
-## Current Release Status
+*Actual popup UI rendered in Chrome with sample test data. This screenshot is a UI preview, not proof of a live extension download.*
 
-`v1.2.1-beta.6` is a macOS prerelease. HLS refresh jobs are checkpointed in session storage before page reload and resume automatically when the new content script reports ready, including after the MV3 worker restarts. One refresh is allowed per job. A 15-second resniff deadline produces an explicit error if no matching fresh HLS is found. See [VALIDATION.md](VALIDATION.md) for browser and downloader evidence and remaining live-site limitations.
+## Download
 
-## Release Package
+- **[Chrome Extension ZIP — start here](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.16/DarrenVideoHelper-Chrome-Extension.zip)**: no Python, Homebrew, yt-dlp or Terminal for direct MP4/WebM downloads.
+- **[macOS Full ZIP](https://github.com/savieri/DarrenVideoHelper/releases/download/v1.2.1-beta.16/DarrenVideoHelper-macOS-Full.zip)**: includes extension, Python host source and installer. **Requires locally installed Python 3.9+, yt-dlp, FFmpeg and ffprobe. These runtimes are not bundled.**
+- [Release notes and checksums](https://github.com/savieri/DarrenVideoHelper/releases/tag/v1.2.1-beta.16)
 
-```text
-DarrenVideoHelper-macOS-v1.2.1-beta.6.zip
+## Install the Chrome extension
+
+1. Download **DarrenVideoHelper-Chrome-Extension.zip** above.
+2. Unzip it and keep the extracted folder in a permanent location.
+3. Enter `chrome://extensions` in Chrome's address bar.
+4. Turn on **Developer mode**.
+5. Click **Load unpacked**.
+6. Select the extracted folder that directly contains **manifest.json**.
+7. Open a video webpage, play the target video for a few seconds, then click the extension icon. Select a direct MP4/WebM resource and click **下载** (Download).
+
+Direct downloads use Chrome's default Downloads folder, inside **DarrenVideoHelper/**, and preserve the detected title and original `.mp4`/`.webm` format. Check `chrome://downloads` for Chrome's authoritative download status. Changing the Native Host output directory does not change Chrome's download folder.
+
+Chrome requires these manual steps for an unpacked extension. This is not a Chrome Web Store install and cannot be installed by clicking a ZIP.
+
+## Install macOS Full
+
+1. Download and unzip **DarrenVideoHelper-macOS-Full.zip**.
+2. Install the dependencies first. If you already use [Homebrew](https://brew.sh), run once:
+   ```sh
+   brew install python yt-dlp ffmpeg
+   ```
+   If you do not have Homebrew or want no Terminal setup, use the Chrome edition for direct files. **Full is not a zero-dependency package.**
+3. Double-click **install.command**. It checks the dependencies, runs the host self-test and registers the Native Host for your user account. It does not install Homebrew, remove quarantine or modify Chrome security settings.
+4. In `chrome://extensions`, enable Developer mode, click **Load unpacked** and select the included **extension/** folder.
+5. Play a video and open the popup. Direct files use Chrome by default; HLS/DASH/site extraction uses the installed host. For a direct file needing captured request headers or MP4 conversion, enable **Full: direct MP4/WebM via Native Host** in Options and select/download the resource again. Retrying an old job keeps its original engine.
+
+Keep the extension folder. The installer copies the host source into your Application Support folder. `uninstall.command` removes host registration and preserves downloads. When changing editions, remove the existing unpacked entry in Chrome, then load the new folder; both editions deliberately share one extension ID.
+
+## Capabilities and compatibility
+
+| Feature | Chrome edition | macOS Full |
+| --- | --- | --- |
+| Network + DOM + iframe detection | Included | Included |
+| Current player binding; SPA navigation; resource list | Included | Included |
+| HLS master and quality variants, duration and size evidence | Detection only | Detection + native download |
+| Direct MP4 / WebM | Chrome download, original format | Chrome by default; optional native download |
+| HLS → MP4 / separate DASH audio + video | Requires Full | Native pipeline, site dependent |
+| YouTube / Bilibili page extraction | Requires Full | Existing pipeline retained; site dependent |
+| Progress, completion, failure, queue, redacted diagnostics | Included | Included |
+| Additional software | None for direct downloads | Python 3.9+, yt-dlp, FFmpeg/ffprobe |
+| Operating systems | Validated here on macOS source/tests; Windows/Linux untested | Apple Silicon macOS checked; Intel macOS untested |
+
+Chrome 119+ / Manifest V3 is required. **Windows and Linux are not claimed as tested or supported releases.** Legacy Windows build files remain in Git history/source for reference and are excluded from release packages.
+
+## Limits
+
+- HLS is detected in Chrome-only mode, but browser-side HLS-to-MP4 merging is **not shipped**. MSE is a playback API; simply saving a playlist or concatenating arbitrary segments does not guarantee a complete MP4. Large files, encrypted segments, split audio, discontinuities and expiring requests require a more robust pipeline. See [the design decision](docs/BROWSER_DOWNLOADS.md).
+- Direct downloads do not transcode, add missing audio, or override server authentication, request-header, download or DRM restrictions. Some signed/CDN links can fail; use a fresh resource or Full when needed. A Chrome `complete` result confirms file transfer, not ffprobe validation.
+- Resource sizes may be estimates; duration/quality can be unknown when the source provides no usable metadata. Ads/previews remain visible in their group and are not silently hidden.
+- Full depends on tools installed on the user's Mac. New yt-dlp site requirements can change; no universal website guarantee is made.
+- Native failed downloads can retain named resumable data for retry; completion requires native validation. No claim is made that every interrupted transfer leaves zero temporary data.
+- Live extension loading, fresh-machine installation and real multi-site downloads were **not completed in this release session**. Chrome's internal extension page was blocked by the browser automation policy. See [validation evidence and remaining manual checks](VALIDATION.md).
+
+## Troubleshooting
+
+| Symptom | What to do |
+| --- | --- |
+| “Manifest file is missing” | Unzip first; choose the folder containing `manifest.json`, not the ZIP or its parent. |
+| No media listed | Reload the webpage after first installation, play for 3–5 seconds, then refresh the popup. Restricted Chrome/internal pages are not video sources. |
+| “需要 macOS Full” | The selected item is HLS/DASH or a site extractor. Install Full with its dependencies, or choose a direct MP4/WebM. |
+| Native Host not found / forbidden | Run Full's installer; use Google Chrome and extension ID `mabnjnddplpelefjgohbjcoajnimpgna`. Other Chromium browsers are not registered. |
+| Missing Python / yt-dlp / FFmpeg | Install dependencies, then rerun `install.command`. `install.command --check --non-interactive` checks without registering. |
+| Installer blocked by macOS | Read the macOS notice and your security settings; use the Chrome edition if you do not want to run local scripts. This package is not notarized. |
+| `SERVER_FORBIDDEN`, expired URL, or failed direct download | Play the video again, refresh the resource list and select its fresh URL. Check Chrome's Downloads page; servers may require Full or reject downloads. |
+| Changed to another video | Reopen/refresh the popup and select the new resource. Stale sessions are rejected; do not reuse an old selection. |
+| Download not in Native output folder | Direct Chrome downloads follow Chrome's download settings. |
+
+## Privacy and permissions
+
+No analytics or remote executable JavaScript is included. `<all_urls>`, tabs, scripting and webRequest enable media detection across pages and embedded frames. Downloads permission controls direct-file transfers. Only Full requests `nativeMessaging`. Request cookies may be used locally by Full when enabled; never upload them or local logs. Exported diagnostics redact credentials, titles, URL paths/queries and local user directories. Review any report before sharing it.
+
+The manifest contains a **public key**, which keeps the extension ID stable. No signing private key is included. Our source is MIT; third-party tools retain their own licenses. The input FFmpeg executables are excluded from public packages because their dynamic libraries and corresponding build provenance were not supplied. [Third-party audit](THIRD_PARTY_NOTICES.md).
+
+## Build and regression tests
+
+For contributors with Node.js and Python 3.9+:
+
+```sh
+bash scripts/test.sh
 ```
 
-This prerelease is verified and published for macOS only. A Windows package is not attached because the current beta was not rebuilt and validated on Windows.
+This checks JS and shell syntax, runs the regression suite, builds both ZIPs, and validates manifests, references, the extension ID, executable modes, package contents and source parity. `python3 scripts/build_release.py` creates the two ZIPs and `dist/SHA256SUMS.txt`. No npm packages are needed. The Chrome package differs from `extension/` only in removing the `nativeMessaging` permission; JS/assets are identical. Full excludes all unreviewed runtime binaries.
 
-The macOS package is designed for Chrome Developer Mode loading:
-
-1. Download and unzip the complete package.
-2. Double-click `install.command` and wait for the self-test to pass.
-3. Enable Developer mode at `chrome://extensions/` and click `Load unpacked`.
-4. Select the included `extension` folder.
-
-See `README-FIRST.md` inside the package for the shortest Chinese installation guide. Chrome requires the final manual `Load unpacked` action and does not permit this installer to silently bypass it.
-
-## What the macOS archive includes
-
-```text
-extension/
-  manifest.json
-  background.js
-  content.js
-  page-navigation.js
-  popup.html
-  popup.js
-  style.css
-  options.html
-  options.js
-  options.css
-  icons/
-native/
-  host.py
-  bin/
-    ffmpeg
-    ffprobe
-install.command
-uninstall.command
-README-FIRST.md
-README.md
-CHANGELOG.md
-```
-
-The macOS package does not contain a PyInstaller Python host or a bundled yt-dlp. `install.command` copies `native/host.py` plus bundled `ffmpeg`/`ffprobe` into `~/Library/Application Support/DarrenVideoHelper/native`, creates the executable `host-source` launcher, and registers that launcher with Chrome. The launcher executes `/usr/bin/python3 host.py`; the host resolves Homebrew yt-dlp and its own bundled media tools.
-
-The repository retains Windows build/install scaffolding, but the Windows native host must be built and validated on Windows before a Windows package is published. PyInstaller does not cross-compile Windows executables from macOS.
-
-## macOS Install
-
-Double-click:
-
-```text
-install.command
-```
-
-The script:
-
-- checks `/usr/bin/python3`, Homebrew yt-dlp, and bundled `ffmpeg`/`ffprobe`
-- installs the source host under `~/Library/Application Support/DarrenVideoHelper/native`
-- renames any legacy bundled `native/bin/yt-dlp` to a timestamped `.disabled-*` backup so Homebrew yt-dlp is authoritative
-- registers the Chrome Native Messaging Host
-- points Chrome to the installed `host-source` launcher
-- runs a mandatory self-test and stops installation if it fails
-- opens `chrome://extensions/`
-- opens the included `extension` folder in Finder
-- prints the `extension` folder to load
-
-The source host deliberately uses Apple's `/usr/bin/python3` path that was verified on the target Mac. Homebrew yt-dlp is required. `ffmpeg` and `ffprobe` remain bundled with the package.
-
-## Build the macOS package
-
-Stage executable arm64 `ffmpeg` and `ffprobe` under `native/bin`, or point the builder at a verified tools directory:
-
-```bash
-DARREN_MACOS_TOOLS_DIR="/path/to/macos/tools" ./build-macos-package.command
-```
-
-The builder refuses an unexpected version, a PyInstaller `native/host`, or a bundled macOS yt-dlp. It runs `host.py --self-test` from the staged package before creating `dist/DarrenVideoHelper-macOS-v1.2.1-beta.6.zip`.
-
-For a visible, fixed Chrome development path, run:
-
-```bash
-scripts/sync-dev-install.command --package
-```
-
-This synchronizes the unpacked extension and required native/install files to
-`~/Downloads/DarrenVideoHelper-beta3`. Chrome should always load
-`~/Downloads/DarrenVideoHelper-beta3/extension`. Add `--install-native` when the
-beta Native Host also needs to be updated; the installer backs up the previous
-source host first.
-
-## macOS Uninstall
-
-Double-click:
-
-```text
-uninstall.command
-```
-
-This removes the Native Messaging Host registration. Remove the Chrome extension from `chrome://extensions/` if desired.
-
-## Windows Install
-
-Double-click:
-
-```text
-install.bat
-```
-
-The script:
-
-- registers the Chrome Native Messaging Host under `HKCU`
-- points Chrome to `native\host.exe`
-- opens `chrome://extensions/`
-- prints the `extension` folder to load
-
-No Python installation is required for users when `native\host.exe` is present.
-
-## Windows Uninstall
-
-Double-click:
-
-```text
-uninstall.bat
-```
-
-This removes the Native Messaging Host registration. Remove the Chrome extension from `chrome://extensions/` if desired.
-
-## Features
-
-- Detects `.m3u8`, `.mp4`, `.m4s`, `.ts`, YouTube `googlevideo/videoplayback` DASH evidence, and Bilibili paired DASH resources.
-- Tracks YouTube navigation start/finish events, History API changes, `popstate`, tab/webNavigation updates, and a videoId/location polling fallback; finish-time reconciliation waits for delayed current-video metadata and cancels older generations.
-- Reads Bilibili `__playinfo__`/`__INITIAL_STATE__` in the page world and captures playurl fetch/XHR responses, while rejecting stale BV/cid data after navigation.
-- Invalidates the previous selection as soon as navigation starts and creates a new `VideoSession` only when page/video identity really changes.
-- Keeps YouTube MSE `blob:` and poster churn inside the current session.
-- Aggregates resolver, DASH, HLS master/variant, and direct-file evidence into one main `LogicalVideo` card.
-- Shows one main logical-video card with user-facing pipelines such as `YouTube · DASH → MP4`, `Bilibili · DASH → MP4`, `HLS → MP4`, or `Direct MP4`; PAGE/SEG/DASH tracks remain internal evidence.
-- Shows a poster by default. Direct MP4 candidates first use one muted `playsInline` popup preview with `preload=none`; YouTube/HLS candidates mirror low-resolution frames from the page's existing player. The page player is never played, paused, seeked, or otherwise controlled. Leaving immediately stops and releases the preview, and every preview is capped at eight seconds. A CORS/MSE capture failure silently keeps the poster; diagnostics appear only in advanced details.
-- Keeps low-level DASH/HLS evidence inside optional advanced details instead of exposing it as extra downloadable videos.
-- Creates an immutable resource snapshot before queueing a native download.
-- Refreshes Bilibili playinfo at click time, merges one selected video representation with the best audio representation, retries signed backup URLs, and requires the final MP4 to contain audio.
-- Downloads only final MP4 output.
-- Does not save page screenshots as results.
-- Does not write thumbnails, info JSON, descriptions, subtitles, or sidecar files.
-- Shows progress percentage, speed, ETA, final file size, and output path.
-- Supports queue download, pause, resume, cancel, and imported URL lists.
-- Download history uses a resource fingerprint and asks before a forced re-download instead of silently skipping.
-- Reuses an existing queued/downloading/merging job when the same resource is clicked again.
-- Fails a native job after a bounded startup timeout or disconnect instead of leaving it at `Starting native download...`.
-- Writes native host startup, job, command, process, traceback, completion, and exit diagnostics to `~/Library/Logs/DarrenVideoHelper/native-host.log`.
-- Includes an Options page for output directory, quality, concurrency, cookies, download-history prompts, MP4-only mode, and advanced source details.
-
-Preview playback uses a direct URL only for ordinary MP4. YouTube blob/MSE and HLS/DASH cards use continuous canvas frames from the page's existing main video element, avoiding popup CORS/CSP playback failures. It never invokes the download command, never controls the page player, and never runs more than one preview at a time.
-
-## Rollback
-
-To return to the last published stable build, download `DarrenVideoHelper-macOS.zip` from the GitHub `v1.0.0` Release, replace the unpacked extension folder, rerun `install.command`, and reload the extension in Chrome. Do not use the unvalidated `v1.1.0` development state as a stable rollback target.
-
-## Native Host Command Shape
-
-For directly detected media the native host uses the captured request context. Page extractors can optionally try the local Chrome Cookie database. If the database is unavailable, the host retries once without it. The native host runs a command equivalent to:
-
-```bash
-yt-dlp --ignore-config --referer "<captured Referer>" \
-  --continue --retries 5 --fragment-retries 8 \
-  -f "bv*+ba/best" \
-  --merge-output-format mp4 \
-  --remux-video mp4 \
-  --no-write-thumbnail \
-  --no-write-info-json \
-  --no-write-playlist-metafiles \
-  --no-embed-thumbnail \
-  --no-write-description \
-  --no-write-comments \
-  --no-write-subs \
-  --no-embed-metadata \
-  -P "<download directory>" \
-  -o "<clean title timestamp>.mp4" \
-  "<video URL or page URL>"
-```
-
-## Output Directory
-
-Default:
-
-```text
-~/Downloads/video_downloads
-```
-
-On Windows this maps to the user's Downloads folder.
-
-## Safety Checks
-
-Downloads are marked `Done` only when:
-
-- the final file is `.mp4`
-- `ffprobe` detects at least one video stream
-- file size and duration are valid
-
-The native host performs these checks even when yt-dlp exits nonzero. It accepts only the exact MP4 target assigned to that job attempt, never a fuzzy directory match. A verified MP4 is reported as `Completed` and is never deleted or overwritten by a trailing progress event, SSL EOF, timeout, 403, post-processing warning, disconnect, or late native error. Page-duration metadata is retained as diagnostics only because it can be stale or describe an ad/player state. If the exact MP4 does not pass ffprobe, the job reports `Failed`; invalid partial MP4 files and image/sidecar outputs from the current job are cleaned up.
+Use GitHub's **Source code** downloads for the source at the release tag. The original beta.15 import and its SHA-256 inventory are retained in the repository history and [provenance inventory](docs/beta15-input-sha256.json).

@@ -1,3 +1,26 @@
+# Changelog
+
+## 1.2.1-beta.16 — 2026-11-20
+
+Based on the supplied beta.15 source, imported as a separate commit with SHA-256 provenance.
+
+- Add a Chrome standalone ZIP with manifest.json at its root and no nativeMessaging permission.
+- Add Chrome Downloads API transfers for exact MP4/WebM selections: detected filenames,
+  progress, persistent IDs, completion/interruption reconciliation, cancellation, and restart guards.
+- Reject stale player/session selections; retain network/DOM/iframe capture, HLS renditions,
+  main-video ranking, SPA recovery and popup rendering from beta.15.
+- Keep HLS/DASH/site extraction on the existing macOS native pipeline; show Full requirements.
+  Full retains an Options switch for native direct-file downloads with captured headers or MP4 conversion.
+- Replace nonportable FFmpeg redistribution with explicit external runtime requirements and
+  an installer that checks dependencies and the derived extension ID before registration.
+- Fix resource inventory controls and group headings being hidden behind the glass backdrop.
+- Strengthen exported diagnostic redaction, remove the extension reload keyboard shortcut,
+  and add bilingual setup, limitations, runtime audit, repeatable package builds and regression checks.
+- Preserve MIT license and existing Git history. This remains a prerelease: live extension
+  loading and fresh-machine/multi-site acceptance are still manual checks in VALIDATION.md.
+
+---
+
 ## 1.2.1-beta.15
 
 - Recover media scans after same-tab navigation using the committed top-level frame when events arrive late or are missed.

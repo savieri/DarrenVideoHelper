@@ -1,0 +1,11 @@
+{
+  "name": "darren-video-helper",
+  "version": "1.2.1-beta.16",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "test": "bash scripts/test.sh",
+    "build": "python3 scripts/build_release.py",
+    "check:release": "python3 scripts/check_release.py"
+  }
+}

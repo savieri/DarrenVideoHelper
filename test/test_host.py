@@ -17,6 +17,15 @@ SPEC.loader.exec_module(HOST)
 class NativeHostTests(unittest.TestCase):
     def setUp(self):
         HOST.TERMINAL_JOB_TYPES.clear()
+        HOST.JOB_CONTEXT.clear()
+        self.state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state_dir.cleanup)
+        patcher = mock.patch.object(HOST, "STATE_DIR", Path(self.state_dir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        sender = mock.patch.object(HOST, "send_message")
+        sender.start()
+        self.addCleanup(sender.stop)
 
     def test_main_keeps_the_native_port_alive_for_multiple_messages(self):
         messages = [
@@ -120,7 +129,7 @@ class NativeHostTests(unittest.TestCase):
             }):
                 with self.assertRaisesRegex(RuntimeError, "没有音频"):
                     HOST.validate_final_output("job", output, require_audio=True)
-            self.assertFalse(output.exists())
+            self.assertTrue(output.exists())
 
     def test_bilibili_direct_failure_falls_back_to_page_even_with_legacy_prefer_page_flag(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -257,7 +266,7 @@ class NativeHostTests(unittest.TestCase):
         self.assertTrue(message["hasAudio"])
         self.assertEqual(message["audioStreams"], 1)
 
-    def test_nonzero_ytdlp_exit_fails_and_removes_invalid_mp4(self):
+    def test_nonzero_ytdlp_exit_fails_and_preserves_invalid_mp4_for_retry(self):
         class FakeProcess:
             pid = 1234
             stdout = iter(["ERROR: timed out\n"])
@@ -277,13 +286,9 @@ class NativeHostTests(unittest.TestCase):
                 mock.patch.object(HOST, "progress"),
                 mock.patch.object(HOST.sys, "stderr"),
             ):
-                result, log, _started_at = HOST.run_ytdlp_attempt(
-                    "job", {}, "https://cdn.test/video.m3u8", output_dir, "video", "HLS"
-                )
-
-            self.assertIsNone(result)
-            self.assertIn("no valid MP4", log)
-            self.assertFalse(output.exists())
+                with self.assertRaisesRegex(HOST.OutputValidationError, "校验未通过"):
+                    HOST.run_ytdlp_attempt("job", {}, "https://cdn.test/video.m3u8", output_dir, "video", "HLS")
+            self.assertTrue(output.exists())
 
     def test_dash_video_only_intermediate_is_not_recovered_as_final_mp4(self):
         class FakeProcess:
@@ -313,7 +318,7 @@ class NativeHostTests(unittest.TestCase):
             self.assertIsNone(result)
             self.assertIn("no valid MP4", log)
             probe.assert_not_called()
-            self.assertFalse(video_only.exists())
+            self.assertTrue(video_only.exists())
 
     def test_direct_hls_failure_never_falls_back_to_page_url(self):
         targets = []

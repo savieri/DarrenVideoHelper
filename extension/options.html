@@ -20,7 +20,7 @@
       </header>
 
       <label>
-        <span>下载目录</span>
+        <span>Native Host 下载目录（Chrome 直接下载使用浏览器默认下载目录）</span>
         <input id="outputDir" type="text" spellcheck="false">
       </label>
 
@@ -42,7 +42,8 @@
       <section class="checks">
         <label><input id="autoCookies" type="checkbox"> 页面解析时尝试读取 Chrome Cookie</label>
         <label><input id="skipDownloaded" type="checkbox"> 下载前提示曾下载（可强制重下）</label>
-        <label><input id="onlyMp4" type="checkbox"> 只下载 MP4</label>
+        <label><input id="nativeDirect" type="checkbox"> Full：直接 MP4/WebM 使用 Native Host 下载（特殊请求头／转 MP4）</label>
+        <label><input id="onlyMp4" type="checkbox"> Native Host 优先输出 MP4</label>
         <label><input id="showAdvanced" type="checkbox"> 显示高级候选项</label>
       </section>
 

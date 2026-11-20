@@ -1,20 +1,8 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
-
-HOST_NAME="com.darren.videohelper"
-MANIFEST_PATH="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts/$HOST_NAME.json"
-
-echo "Darren Video Helper uninstall"
-echo
-
-if [[ -f "$MANIFEST_PATH" ]]; then
-  rm -f "$MANIFEST_PATH"
-  echo "Removed Native Messaging Host:"
-  echo "$MANIFEST_PATH"
-else
-  echo "Native Messaging Host was not registered."
-fi
-
-echo
-echo "You can remove the Chrome extension from chrome://extensions/."
-read -r -p "Press Enter to close..."
+HOST_NAME=com.darren.videohelper
+MANIFEST_DIR="${DARREN_CHROME_MANIFEST_DIR:-$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts}"
+rm -f "$MANIFEST_DIR/$HOST_NAME.json"
+echo 'Native Host registration removed. Downloads and installed source were preserved.'
+echo 'Remove the extension in chrome://extensions if desired.'
+if [[ -t 0 && "${1:-}" != --non-interactive ]]; then read -r -p 'Press Enter to close...' || true; fi

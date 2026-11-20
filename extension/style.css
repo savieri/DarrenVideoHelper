@@ -710,3 +710,11 @@ footer button {
 .resource-group > summary { padding: 5px 4px; cursor: pointer; font-weight: 650; }
 .resource-group .stream-card { margin-top: 6px; }
 .stream-card .source-details { overflow-wrap: anywhere; }
+
+/* Keep inventory controls and group headings above the glass backdrop. */
+.resource-toolbar,
+.capture-details,
+.streams,
+.jobs {
+  position: relative;
+}

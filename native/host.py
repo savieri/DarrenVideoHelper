@@ -18,7 +18,7 @@ from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl
 
-HOST_VERSION = "1.2.1-beta.15"
+HOST_VERSION = "1.2.1-beta.16"
 DEFAULT_OUTPUT_DIR = Path.home() / "Downloads" / "video_downloads"
 LOG_PATH = Path(os.environ.get("VIDEO_HELPER_LOG_PATH") or Path.home() / "Library/Logs/DarrenVideoHelper/native-host.log")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
@@ -216,6 +216,8 @@ def app_dir():
 
 
 def bundled_tool_candidates(name):
+    if os.environ.get("VIDEO_HELPER_EXTERNAL_TOOLS") == "1":
+        return
     names = [name]
     if os.name == "nt" and not name.lower().endswith(".exe"):
         names.insert(0, f"{name}.exe")
@@ -383,7 +385,7 @@ def sanitize_filename(value):
     value = re.sub(r"\s+", " ", value).strip(" .")
     if not value:
         value = "video"
-    return value[:150]
+    return value.encode("utf-8")[:180].decode("utf-8", errors="ignore")
 
 
 def validate_url(url):

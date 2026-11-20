@@ -133,6 +133,9 @@ async function scanStreams(generation) {
     const alreadyRendered = currentState?.sessionId === result.sessionId &&
       JSON.stringify(currentState?.streams) === JSON.stringify(result.streams);
     currentState = result;
+    document.getElementById("modeNotice").textContent = result.mode === "full"
+      ? "Full · MP4/WebM 使用 Chrome 下载；HLS/站点解析需要安装 macOS Native Host。"
+      : "Chrome 独立版 · 直接 MP4/WebM 免安装下载。HLS/DASH/站点解析需要 macOS Full。";
     if (!result.navigating) navigationPolls = 0;
 
     pageTitleEl.textContent = currentState.pageTitle || currentState.pageUrl || "当前网页";
@@ -271,7 +274,7 @@ function renderResource(stream) {
   const downloadButton = document.createElement("button");
   downloadButton.type = "button";
   downloadButton.className = "primary download-button";
-  downloadButton.textContent = "下载";
+  downloadButton.textContent = stream.requiresFull ? "需要 macOS Full" : "下载";
   downloadButton.disabled = !stream.canDownloadWholeVideo;
   downloadButton.addEventListener("click", () => downloadStream(stream, downloadButton, qualitySelect.value));
   if (downloadButton.disabled) downloadButton.title = stream.availability || "资源不可下载";

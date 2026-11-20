@@ -5,6 +5,7 @@ const DEFAULT_SETTINGS = {
   autoCookies: true,
   skipDownloaded: true,
   onlyMp4: true,
+  nativeDirect: false,
   showAdvanced: false
 };
 
@@ -15,6 +16,7 @@ const fields = {
   autoCookies: document.getElementById("autoCookies"),
   skipDownloaded: document.getElementById("skipDownloaded"),
   onlyMp4: document.getElementById("onlyMp4"),
+  nativeDirect: document.getElementById("nativeDirect"),
   showAdvanced: document.getElementById("showAdvanced")
 };
 const statusEl = document.getElementById("status");
@@ -34,6 +36,8 @@ async function load() {
   fields.autoCookies.checked = settings.autoCookies !== false;
   fields.skipDownloaded.checked = settings.skipDownloaded !== false;
   fields.onlyMp4.checked = settings.onlyMp4 !== false;
+  fields.nativeDirect.disabled = !chrome.runtime.getManifest().permissions?.includes("nativeMessaging");
+  fields.nativeDirect.checked = !fields.nativeDirect.disabled && settings.nativeDirect === true;
   fields.showAdvanced.checked = settings.showAdvanced === true;
 }
 
@@ -45,6 +49,7 @@ async function save() {
     autoCookies: fields.autoCookies.checked,
     skipDownloaded: fields.skipDownloaded.checked,
     onlyMp4: fields.onlyMp4.checked,
+    nativeDirect: !fields.nativeDirect.disabled && fields.nativeDirect.checked,
     showAdvanced: fields.showAdvanced.checked
   };
   const response = await sendMessage({ type: "saveSettings", settings });

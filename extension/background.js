@@ -28,6 +28,7 @@ const DEFAULT_SETTINGS = {
   autoCookies: true,
   skipDownloaded: true,
   onlyMp4: true,
+  nativeDirect: false,
   showAdvanced: false
 };
 
@@ -390,6 +391,9 @@ function handleRuntimeMessage(message, sender, sendResponse) {
     return false;
   }
   if (message?.type === "getDiagnostics") {
+    const originalSendResponse = sendResponse;
+    sendResponse = value => originalSendResponse(value.diagnostics
+      ? { ...value, diagnostics: redactDiagnostics(value.diagnostics) } : value);
     getPopupState(message.tabId).then(p => {
       const state = tabState.get(p.tabId);
       sendResponse({ ok: true, diagnostics: {
@@ -488,7 +492,7 @@ function handleRuntimeMessage(message, sender, sendResponse) {
     return true;
   }
   if (message.type === "getJobs") {
-    sendResponse({ ok: true, jobs: publicJobs(), queuePaused });
+    jobsReady.then(refreshBrowserDownloads).then(() => sendResponse({ ok: true, jobs: publicJobs(), queuePaused }));
     return true;
   }
 
@@ -625,6 +629,7 @@ async function getPopupState(tabId, retryCount = 0) {
     streams.push({ ...card, exactSelection: false, group: "other", recommended: false,
       availability: "站点解析", recommendationReason: "由站点解析器按当前网页选择媒体" });
   }
+  for (const stream of streams) stream.requiresFull = !hasNativeMode() && !isDirectVideoKind(stream.kind);
   const recommended = recommendMainResource(streams, state);
   if (recommended) {
     recommended.group = "recommended";
@@ -664,6 +669,7 @@ async function getPopupState(tabId, retryCount = 0) {
       ...(probes.remaining < 0 ? ["本次清单探测达到上限，未探测的资源仍保留"] : []),
       ...(state.inventoryEvicted ? ["当前标签页的资源缓存已达上限"] : [])
     ],
+    mode: hasNativeMode() ? "full" : "chrome",
     settings,
     queuePaused,
     jobs: publicJobs()
@@ -1671,6 +1677,15 @@ async function restoreDownloadJobs() {
   for (const job of saved[JOB_STORAGE_KEY] || []) merged.set(job.id, job);
   for (const job of merged.values()) if (job?.id && job.payload && !jobs.has(job.id)) jobs.set(job.id, job);
   for (const job of jobs.values()) {
+    if (job.browserDownload) {
+      if (!TERMINAL_JOB_STATUSES.has(job.status) && Number.isInteger(job.browserDownloadId)) {
+        await refreshBrowserJob(job);
+      } else if (!TERMINAL_JOB_STATUSES.has(job.status) && job.browserDispatching) {
+        // Never start a duplicate after suspension between API dispatch and ID persistence.
+        job.status = "incomplete"; job.message = "Chrome 下载状态未确认，请先检查 chrome://downloads，再重试。";
+      }
+      continue;
+    }
     if (!["completed", "cancelled"].includes(job.status) && (job.nativeDispatched || ["failed", "incomplete"].includes(job.status))) {
       await reconcileNativeJob(job);
     }
@@ -1722,6 +1737,7 @@ async function exportJobDiagnostics(jobId) {
     details: job.details, exitCode: job.exitCode ?? null, logs: job.logs, flow: job.flowLog,
     pageUrl: diagnosticUrl(job.pageUrl), resourceUrl: diagnosticUrl(job.payload.url)
   };
+  if (job.browserDownload || !hasNativeMode()) return redactDiagnostics(snapshot);
   let port;
   try {
     const nativeLog = await new Promise((resolve, reject) => {
@@ -1755,7 +1771,7 @@ async function exportJobDiagnostics(jobId) {
   } finally {
     if (port) safeDisconnect(port);
   }
-  return snapshot;
+  return redactDiagnostics(snapshot);
 }
 
 async function reconcileNativeJob(job) {
@@ -1793,10 +1809,10 @@ async function reconcileNativeJob(job) {
 async function retryJob(jobId) {
   const job = jobs.get(jobId);
   if (!job || !["incomplete", "failed", "cancelled"].includes(job.status)) return;
-  await reconcileNativeJob(job);
+  if (!job.browserDownload) await reconcileNativeJob(job);
   if (job.status === "completed" || job.reconciling) return;
   Object.assign(job, { status: "queued", flowState: "DOWNLOAD_START", retryCount: 0,
-    nativeDispatched: false, rejectedUrls: [], error: "", details: "", exitCode: null, percent: "",
+    browserDownloadId: undefined, browserDispatching: false, nativeDispatched: false, rejectedUrls: [], error: "", details: "", exitCode: null, percent: "",
     speed: "", eta: "",
     playerRefreshAttempted: false, refreshRequestedAt: 0, refreshDeadline: 0, message: "准备重试…" });
   const state = tabState.get(job.payload.tabId);
@@ -2088,6 +2104,11 @@ async function startDownload(tabId, selection, options = {}) {
     qualityPreference: selection?.qualityPreference || "", exact: resolved.exact,
     displayedTitle: typeof selection?.sourceTitle === "string" ? selection.sourceTitle.trim().slice(0, 300) : ""
   });
+  // Download the exact validated resource, never a page extractor substitute.
+  if (isDirectVideoKind(resolved.stream.kind) && (!hasNativeMode() || settings.nativeDirect !== true)) {
+    payload = deepFreeze({ ...payload, browserDownload: true, kind: resolved.stream.kind,
+      url: resolved.stream.lastUrl || resolved.stream.url, preferPageUrl: false });
+  }
   return enqueueDownload(payload, settings, options);
 }
 
@@ -2123,6 +2144,7 @@ async function importUrls(urls) {
   const jobIds = [];
   for (const url of cleanUrls) {
     const host = getHost(url) || "Imported URL";
+    const directKind = /\.webm(?:[?#]|$)/i.test(url) ? "webm" : /\.mp4(?:[?#]|$)/i.test(url) ? "mp4" : "";
     const payload = {
       action: "download",
       url,
@@ -2130,9 +2152,10 @@ async function importUrls(urls) {
       pageUrl: url,
       pageTitle: host,
       sourceTitle: host,
-      kind: "page",
+      kind: directKind || "page",
+      browserDownload: Boolean(directKind) && (!hasNativeMode() || settings.nativeDirect !== true),
       headers: {},
-      preferPageUrl: true,
+      preferPageUrl: !directKind,
       resourceId: makeId("import"),
       resourceUrl: url,
       fingerprint: stableFingerprint(`import|${normalizePageUrl(url)}`),
@@ -2144,7 +2167,8 @@ async function importUrls(urls) {
     if (response.ok) jobIds.push(response.jobId);
   }
   processQueue();
-  return { ok: true, jobIds };
+  return { ok: jobIds.length > 0, jobIds, rejectedCount: cleanUrls.length - jobIds.length,
+    error: jobIds.length ? "" : "没有可下载的直接 MP4/WebM 链接；HLS/站点页面需要 macOS Full。" };
 }
 
 function findDownloadStream(state, streamId) {
@@ -2351,6 +2375,8 @@ function buildDownloadPayload(state, stream, settings, options = {}) {
 
 async function enqueueDownload(payload, settings, options = {}) {
   await jobsReady;
+  if (!payload.browserDownload && !hasNativeMode()) return { ok: false,
+    error: "此资源需要 macOS Full + Native Host（HLS / DASH / 站点解析）。Chrome 独立版支持直接 MP4/WebM，不会把 m3u8 当作视频保存。" };
   const activeJob = findActiveJob(payload);
   if (activeJob) {
     return {
@@ -2399,6 +2425,7 @@ async function enqueueDownload(payload, settings, options = {}) {
     title: payload.sourceTitle || payload.pageTitle || getHost(payload.url),
     payload,
     originalPayload: payload,
+    browserDownload: payload.browserDownload === true,
     flowState: "DOWNLOAD_START",
     retryCount: 0,
     downloadFormat: "mp4",
@@ -2423,6 +2450,7 @@ async function processQueue() {
       if (!job) break;
       try {
         await transitionJob(job, "DOWNLOAD_START", "正在检查当前媒体链接…", { status: "downloading" });
+        if (job.browserDownload) { await startBrowserJob(job); continue; }
         const hls = !job.payload.exactSelection && isHlsKind(job.payload.kind) && job.payload.tabId != null;
         const next = hls ? await sniffJobCandidate(job, false) : job.payload;
         if (TERMINAL_JOB_STATUSES.has(job.status)) continue;
@@ -2631,6 +2659,9 @@ function readableNativeDisconnectError(rawMessage) {
 function cancelJob(jobId) {
   const job = jobs.get(jobId);
   if (!job) return;
+  if (job.browserDownload && Number.isInteger(job.browserDownloadId)) {
+    void chrome.downloads.cancel(job.browserDownloadId).catch(() => {});
+  }
   const port = runningPorts.get(jobId);
   if (port) {
     runningPorts.delete(jobId);
@@ -4346,4 +4377,86 @@ async function requestPlayerMedia(job) {
       return { triggered, playing: videos.some(v => !v.paused), method: triggered ? "hls.startLoad" : "passive-listener" };
     } });
   logJobFlow(job, "player request", { frames: results.map(result => result.result) });
+}
+
+
+// beta.16: Chrome owns direct-file downloads, including persistence and completion.
+function hasNativeMode() {
+  return chrome.runtime.getManifest().permissions?.includes("nativeMessaging") === true;
+}
+
+function browserFilename(title, kind) {
+  let name = String(title || "video").normalize("NFC").replace(/[\x00-\x1f\x7f<>:"/\\|?*]/g, " ")
+    .replace(/\s+/g, " ").trim().replace(/^[. ]+|[. ]+$/g, "").replace(/\.(?:mp4|webm)$/i, "");
+  name = Array.from(name).slice(0, 60).join("") || "video";
+  if (/^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(name)) name = "video-" + name;
+  return "DarrenVideoHelper/" + name + (kind === "webm" ? ".webm" : ".mp4");
+}
+
+async function startBrowserJob(job) {
+  if (TERMINAL_JOB_STATUSES.has(job.status) || Number.isInteger(job.browserDownloadId)) return;
+  const url = safeUrl(job.payload.url);
+  if (!url || !/^https?:$/.test(url.protocol) || !isDirectVideoKind(job.payload.kind)) {
+    throw new Error("Chrome 独立版只支持直接 HTTP(S) MP4/WebM 资源。");
+  }
+  const state = tabState.get(job.payload.tabId);
+  if (state && (state.invalidated || state.sessionId !== job.payload.sessionId)) {
+    throw new Error("原视频已切换，请重新选择当前视频。");
+  }
+  job.browserDispatching = true;
+  await persistDownloadJobs();
+  const id = await chrome.downloads.download({ url: url.href,
+    filename: browserFilename(job.title, job.payload.kind), conflictAction: "uniquify", saveAs: false });
+  job.browserDownloadId = id;
+  job.browserDispatching = false;
+  if (job.status === "cancelled") { await chrome.downloads.cancel(id).catch(() => {}); return; }
+  await persistDownloadJobs();
+  await refreshBrowserJob(job);
+}
+
+async function refreshBrowserJob(job) {
+  if (!Number.isInteger(job.browserDownloadId) || TERMINAL_JOB_STATUSES.has(job.status)) return;
+  const [item] = await chrome.downloads.search({ id: job.browserDownloadId });
+  if (TERMINAL_JOB_STATUSES.has(job.status)) return;
+  if (!item) {
+    updateJob(job.id, { status: "incomplete", message: "Chrome 下载记录已移除，无法确认完成。" });
+    return;
+  }
+  const size = item.totalBytes > 0 ? item.totalBytes : item.fileSize;
+  const patch = { fileSize: item.bytesReceived || 0, outputPath: item.filename || "",
+    percent: size > 0 ? ((item.bytesReceived || 0) / size * 100).toFixed(1) : "",
+    message: item.paused ? "Chrome 下载已暂停，可在 chrome://downloads 继续。" : "Chrome 正在下载原始视频文件…" };
+  if (item.state === "complete") Object.assign(patch, { status: "completed", percent: "100",
+    fileSize: item.fileSize > 0 ? item.fileSize : item.bytesReceived, message: "Chrome 下载完成（原始文件）。" });
+  else if (item.state === "interrupted") Object.assign(patch, {
+    status: item.error === "USER_CANCELED" ? "cancelled" : "failed",
+    error: item.error || "DOWNLOAD_INTERRUPTED", message: "Chrome 下载中断：" + (item.error || "未知错误") });
+  else Object.assign(patch, { status: "downloading" });
+  const changed = updateJob(job.id, patch);
+  if (changed && patch.status === "completed") await saveHistory(job);
+}
+
+async function refreshBrowserDownloads() {
+  await Promise.all([...jobs.values()].filter(j => j.browserDownload && !TERMINAL_JOB_STATUSES.has(j.status))
+    .map(j => refreshBrowserJob(j).catch(() => {})));
+  if (jobsInitialized) void processQueue();
+}
+
+chrome.downloads?.onChanged.addListener(delta => {
+  void jobsReady.then(async () => {
+    const job = [...jobs.values()].find(j => j.browserDownloadId === delta.id && j.browserDownload);
+    if (job) { await refreshBrowserJob(job); void processQueue(); }
+  }).catch(() => {});
+});
+
+function redactDiagnostics(value, key = "") {
+  if (/cookie|authorization|token|secret|password|^headers$|title|^player$|outputPath|filename/i.test(key)) return "[redacted]";
+  if (Array.isArray(value)) return value.map(v => redactDiagnostics(v));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k,v]) => [k,redactDiagnostics(v,k)]));
+  if (typeof value !== "string") return value;
+  return value.replace(/https?:\/\/[^\s<>"']+/gi, raw => {
+    try { const u = new URL(raw); return u.origin + "/[path-redacted]"; } catch { return "[url-redacted]"; }
+  }).replace(/(?:\/Users\/|\/home\/)[^\s"']+/g, "[local-path-redacted]")
+    .replace(/(?:Bearer|Basic)\s+[^\s]+/gi, "[credential-redacted]")
+    .replace(/(?:cookie|authorization|token|api[_-]?key|secret|password)\s*[:=]\s*[^\r\n,;]+/gi, "[credential-redacted]");
 }

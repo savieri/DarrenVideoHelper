@@ -20,6 +20,7 @@ function loadBackground() {
     commands: { onCommand: event() },
     runtime: {
       lastError: null,
+      getManifest: () => ({ permissions: ["nativeMessaging"], version_name: "1.2.1-beta.16" }),
       onInstalled: event(),
       onMessage: event(),
       reload() {},
@@ -29,7 +30,9 @@ function loadBackground() {
       }
     },
     scripting: { executeScript: async () => [] },
+    alarms: { onAlarm: event(), create: async () => {}, clear: async () => {} },
     storage: {
+      session: { async get(defaults) { return { ...defaults }; }, async set() {} },
       local: {
         async get(defaults) { return { ...defaults, ...storage }; },
         async set(values) { Object.assign(storage, values); }
@@ -46,11 +49,14 @@ function loadBackground() {
       async query() { return [{ id: 1, url: "https://site.test/a", title: "A" }]; }
     },
     webNavigation: {
+      onBeforeNavigate: event(),
+      onErrorOccurred: event(),
       onCommitted: event(),
       onHistoryStateUpdated: event(),
       onReferenceFragmentUpdated: event()
     },
     webRequest: {
+      onHeadersReceived: event(),
       onBeforeRequest: event(),
       onBeforeSendHeaders: event()
     }
@@ -66,7 +72,7 @@ function loadBackground() {
       headers: { get: () => null },
       text: async () => ""
     }),
-    setTimeout,
+    setTimeout: (...args) => { const timer = setTimeout(...args); timer.unref(); return timer; },
     clearTimeout
   });
   const source = fs.readFileSync(path.join(__dirname, "../extension/background.js"), "utf8");
@@ -685,7 +691,7 @@ test("native host exits are converted to a readable diagnostic", () => {
   assert.match(result, /本地助手意外退出/);
 });
 
-test("a disconnected native port fails the active job instead of leaving Starting", async () => {
+test("a disconnected native port reconciles the disk ledger instead of remaining Starting", async () => {
   const { context } = loadBackground();
   const result = await evaluate(context, `(async () => {
     const payload = {
@@ -701,12 +707,14 @@ test("a disconnected native port fails the active job instead of leaving Startin
     chrome.runtime.connectNative = () => port;
     startNativeJob(jobs.get(created.jobId), { outputDir: "~/Downloads/video_downloads" });
     chrome.runtime.lastError = { message: "Native host has exited." };
+    queryNativeJob = async () => ({ active: false, state: { status: "failed", message: "本地任务失败", details: "native-host.log" } });
     onDisconnect.listener();
     const job = jobs.get(created.jobId);
+    await reconcileNativeJob(job);
     return { status: job.status, message: job.message, details: job.details, running: runningPorts.size };
   })()`);
   assert.equal(result.status, "failed");
-  assert.match(result.message, /本地助手意外退出/);
+  assert.match(result.message, /本地任务失败/);
   assert.match(result.details, /native-host\.log/);
   assert.equal(result.running, 0);
 });
@@ -785,3 +793,128 @@ test("popup preview is muted, bounded, single-instance, and silently falls back 
   assert.doesNotMatch(content, /video\.play\(/);
   assert.doesNotMatch(content, /video\.pause\(/);
 });
+
+test("Chrome-only refuses HLS before enqueuing or connecting to Native Host", async () => {
+  const {context} = loadBackground();
+  const result = await evaluate(context, `(async () => {
+    await jobsReady;
+    chrome.runtime.getManifest = () => ({ permissions: ["downloads"] });
+    return { response: await enqueueDownload({kind:"hls_media",url:"https://cdn.test/a.m3u8"},{},{quiet:true}), count:jobs.size };
+  })()`);
+  assert.equal(result.response.ok,false);
+  assert.match(result.response.error,/macOS Full/);
+  assert.equal(result.count,0);
+});
+
+test("browser filenames preserve detected title and WebM extension while preventing paths", () => {
+  const {context}=loadBackground();
+  assert.equal(evaluate(context,'browserFilename("../Example / title.webm", "webm")'), 'DarrenVideoHelper/Example title.webm');
+  assert.equal(evaluate(context,'browserFilename("CON", "mp4")'), 'DarrenVideoHelper/video-CON.mp4');
+});
+
+test("Chrome direct download saves exact selected URL and reports real progress and completion", async () => {
+  const {context}=loadBackground();
+  const result = await evaluate(context, `(async () => {
+    await jobsReady; let options;
+    let item = {id:91,state:"in_progress",bytesReceived:25,totalBytes:100,filename:"/test/Current video.mp4"};
+    chrome.downloads = { download: async value => {options=value;return 91;}, search:async()=>[item] };
+    const job={id:"browser-current",status:"downloading",browserDownload:true,title:"Current video",logs:[],
+      payload:{kind:"mp4",url:"https://cdn.test/current.mp4?signature=local-only"}};
+    jobs.set(job.id,job); await startBrowserJob(job);
+    const progress=job.percent;
+    item={...item,state:"complete",bytesReceived:100,fileSize:100};await refreshBrowserJob(job);
+    item={...item,state:"interrupted",error:"NETWORK_FAILED"};await refreshBrowserJob(job);
+    return {options,progress,status:job.status,percent:job.percent};
+  })()`);
+  assert.equal(result.options.url,'https://cdn.test/current.mp4?signature=local-only');
+  assert.equal(result.options.filename,'DarrenVideoHelper/Current video.mp4');
+  assert.equal(result.progress,'25.0');assert.equal(result.status,'completed');assert.equal(result.percent,'100');
+});
+
+test("Chrome interrupted download is failed, never completed", async () => {
+  const {context}=loadBackground();
+  const result=await evaluate(context,`(async()=>{await jobsReady;
+    chrome.downloads={search:async()=>[{state:"interrupted",error:"SERVER_FORBIDDEN",bytesReceived:0}]};
+    const j={id:"forbidden",status:"downloading",browserDownload:true,browserDownloadId:92,payload:{},logs:[]};
+    jobs.set(j.id,j);await refreshBrowserJob(j);return {status:j.status,error:j.error};})()`);
+  assert.equal(result.status,'failed');assert.equal(result.error,'SERVER_FORBIDDEN');
+});
+
+test("switching player session prevents a queued old Chrome resource from starting", async () => {
+  const {context}=loadBackground();
+  await assert.rejects(evaluate(context,`(async()=>{await jobsReady;
+    const state=ensureVideoSession(50,{pageUrl:"https://site.test/b",pageTitle:"B"});
+    chrome.downloads={download:async()=>{throw new Error("must not dispatch")}};
+    await startBrowserJob({id:"stale-browser",status:"downloading",payload:{tabId:50,sessionId:"old",kind:"mp4",url:"https://cdn.test/a.mp4"}});
+  })()`),/视频已切换/);
+});
+
+test("exported diagnostics remove credentials, path tokens, titles, and user directories", () => {
+  const {context}=loadBackground();
+  const output=evaluate(context,`JSON.stringify(redactDiagnostics({title:"Private title",headers:{cookie:"secret"},
+    url:"https://user:password@cdn.test/private-token/video.mp4?token=secret",details:"Bearer abc /Users/name/private/video.mp4"}))`);
+  for(const value of ['Private title','secret','password','private-token','/Users/name','Bearer abc']) assert.ok(!output.includes(value));
+  assert.match(output,/cdn.test/);
+});
+
+test("browser restart reconciles saved download ID without redispatching", async () => {
+  const {context}=loadBackground();
+  const result=await evaluate(context,`(async()=>{await jobsReady;
+    const saved={id:"restore-browser",status:"downloading",browserDownload:true,browserDownloadId:77,payload:{kind:"mp4"},logs:[]};
+    chrome.storage.session.get=async()=>({downloadJobsV6:[saved]});
+    chrome.downloads={search:async()=>[{id:77,state:"complete",bytesReceived:128,fileSize:128,filename:"/test/Current.mp4"}],
+      download:async()=>{throw new Error("must not redispatch")}};
+    jobs.clear();await restoreDownloadJobs();return jobs.get(saved.id).status;})()`);
+  assert.equal(result,'completed');
+});
+
+test("suspension during browser dispatch marks uncertainty and never starts a duplicate", async () => {
+  const {context}=loadBackground();
+  const result=await evaluate(context,`(async()=>{await jobsReady;
+    const saved={id:"dispatch-uncertain",status:"downloading",browserDownload:true,browserDispatching:true,payload:{},logs:[]};
+    chrome.storage.session.get=async()=>({downloadJobsV6:[saved]});
+    jobs.clear();await restoreDownloadJobs();return jobs.get(saved.id).status;})()`);
+  assert.equal(result,'incomplete');
+});
+
+test("cancelling during browser API dispatch cancels the returned Chrome download", async () => {
+  const {context}=loadBackground();
+  const result=await evaluate(context,`(async()=>{await jobsReady;
+    let dispatched,resolveDownload,cancelled;
+    const dispatchedPromise=new Promise(r=>dispatched=r);
+    chrome.downloads={download:()=>{dispatched();return new Promise(r=>resolveDownload=r);},cancel:async id=>{cancelled=id;}};
+    const j={id:"cancel-dispatch",status:"downloading",browserDownload:true,payload:{kind:"mp4",url:"https://cdn.test/current.mp4"},logs:[]};
+    jobs.set(j.id,j);const pending=startBrowserJob(j);await dispatchedPromise;
+    cancelJob(j.id);resolveDownload(88);await pending;return {cancelled,status:j.status};})()`);
+  assert.equal(result.cancelled,88);assert.equal(result.status,'cancelled');
+});
+
+test("long Unicode browser titles fit common filesystem filename limits", () => {
+  const {context}=loadBackground();
+  const filename=evaluate(context,'browserFilename("🎥".repeat(300), "mp4")').split('/').pop();
+  assert.ok(Buffer.byteLength(filename,'utf8')<=255);
+});
+
+for (const [full,nativeDirect,browser] of [[true,true,false],[true,false,true],[false,true,true]]) {
+  test(`validated direct selection keeps requested engine: full=${full}, nativeDirect=${nativeDirect}`, async () => {
+    const {context}=loadBackground();
+    const result=await evaluate(context,`(async()=>{await jobsReady;
+      chrome.runtime.getManifest=()=>({permissions:${full?'["downloads","nativeMessaging"]':'["downloads"]'}});
+      chrome.storage.sync.get=async defaults=>({...defaults,nativeDirect:${nativeDirect}});
+      const url="https://cdn.test/current.mp4";
+      const state=updateVideoContext(60,{pageUrl:"https://site.test/watch",pageTitle:"Current page",
+        mainVideo:{currentSrc:url,duration:8,width:640,height:360}});
+      upsertStream(60,url,{source:"network",frameId:0,headers:{referer:"https://site.test/watch"}});
+      const stream=[...state.streams.values()].find(s=>s.kind==="mp4");
+      const response=await startDownload(60,{resourceId:stream.id,sessionId:state.sessionId,
+        resourceUrl:url,exactSelection:true,sourceTitle:"Current selected video"},{quiet:true});
+      if(!response.ok)throw new Error(response.error);
+      const job=jobs.get(response.jobId);
+      return {browser:job.browserDownload,url:job.payload.url,title:job.title,referer:job.payload.headers.referer};
+    })()`);
+    assert.equal(result.browser,browser);
+    assert.equal(result.url,'https://cdn.test/current.mp4');
+    assert.equal(result.title,'Current selected video');
+    assert.equal(result.referer,'https://site.test/watch');
+  });
+}

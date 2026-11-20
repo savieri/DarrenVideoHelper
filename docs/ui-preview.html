@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Darren Video Helper</title>
+    <link rel="stylesheet" href="../extension/style.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <img class="brand-icon" src="../extension/icons/icon48.png" alt="">
+      <div class="title-block">
+        <p class="eyebrow">Universal Web Video Downloader</p>
+        <h1 id="pageTitle">Waiting for current tab...</h1>
+      </div>
+      <div class="top-actions">
+        <button id="refreshButton" class="icon-button" type="button" title="刷新">↻</button>
+        <button id="optionsButton" class="icon-button" type="button" title="设置">⚙</button>
+      </div>
+    </header>
+
+    <section class="notice muted" id="modeNotice" aria-live="polite"></section>
+    <section id="notice" class="notice" hidden></section>
+
+    <section class="utility-actions" aria-label="下载队列工具">
+      <button id="pauseQueueButton" type="button">暂停</button>
+      <button id="resumeQueueButton" type="button">继续</button>
+      <button id="diagnosticsButton" type="button">导出诊断</button>
+      <label class="import-button">
+        导入
+        <input id="importFile" type="file" accept=".txt,.csv,text/plain,text/csv" hidden>
+      </label>
+    </section>
+
+    <section id="resourceToolbar" class="resource-toolbar" aria-label="媒体资源" hidden>
+      <span id="resourceCount" aria-live="polite"></span>
+      <label>排序
+        <select id="resourceSort">
+          <option value="evidence">推荐顺序</option>
+          <option value="sizeBytes">大小</option>
+          <option value="duration">时长</option>
+          <option value="quality">清晰度</option>
+        </select>
+      </label>
+    </section>
+    <details id="captureDetails" class="capture-details" hidden>
+      <summary>查看采集情况</summary>
+      <ul id="captureGaps"></ul>
+    </details>
+    <main id="streams" class="streams"></main>
+
+    <section id="jobs" class="jobs" hidden>
+      <div class="section-title">
+        <h2>下载队列</h2>
+        <span id="queueState"></span>
+      </div>
+      <div id="jobList"></div>
+    </section>
+
+    <footer>
+      <span>当前标签页媒体资源</span>
+      <span id="versionLabel">非 DRM · MP4 / WebM</span>
+    </footer>
+
+    <script src="ui-fixture.js"></script>
+    <script src="../extension/popup.js"></script>
+  </body>
+</html>

@@ -2,9 +2,9 @@
   "manifest_version": 3,
   "name": "Darren Video Helper",
   "short_name": "Video Helper",
-  "description": "Universal Web Video Downloader for browser-playable non-DRM HLS/MP4/WebM video.",
-  "version": "1.2.1.15",
-  "version_name": "1.2.1-beta.15",
+  "description": "Detect video resources. Download direct MP4/WebM in Chrome; macOS native host enables HLS and site extraction.",
+  "version": "1.2.1.16",
+  "version_name": "1.2.1-beta.16",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApWa0owsnSiltR8LQsRiNQQ8PjcIrM9kb6KmHP5OAPJy29hp45wzovdfLyZkjn8l3vqbM6LXCNbY15uYK6ouMxDhq5m0JJBDBryajcZtTzSuaqOL7TO9Ag4u8PHcHVoA6C4a1HHTnmahP9Ps64wIfumyuPdZyFlFiQg8qWWRQ8Wc53DEtP/P9AhQaosfAoNWR3yJQQ1t4EWEYkP1Fsum1ezsDgVbKFT3v1uhTUhQal0a9vmTVXxvNP/i3T2kKCYQJwWNQ8Lqaay+1ryvNm+6lICSeDq6pnTRDmWVxnhbyplKDiVwFiCBRpA+GVdFy5G4JIel8MvGWMHb1CchNQqrs8QIDAQAB",
   "minimum_chrome_version": "119",
   "permissions": [
@@ -16,7 +16,8 @@
     "storage",
     "tabs",
     "webNavigation",
-    "webRequest"
+    "webRequest",
+    "downloads"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -86,14 +87,5 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "options_page": "options.html",
-  "commands": {
-    "reload_extension": {
-      "suggested_key": {
-        "default": "Ctrl+Shift+R",
-        "mac": "Command+Shift+R"
-      },
-      "description": "Reload this extension during local development"
-    }
-  }
+  "options_page": "options.html"
 }

@@ -1,175 +1,68 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-EXTENSION_ID="mabnjnddplpelefjgohbjcoajnimpgna"
-HOST_NAME="com.darren.videohelper"
-PACKAGE_ROOT="$(cd "$(dirname "$0")" && pwd)"
-EXTENSION_DIR="$PACKAGE_ROOT/extension"
-SOURCE_HOST="$PACKAGE_ROOT/native/host.py"
-SOURCE_BIN_DIR="$PACKAGE_ROOT/native/bin"
-INSTALL_ROOT="${DARREN_INSTALL_ROOT:-$HOME/Library/Application Support/DarrenVideoHelper}"
-NATIVE_INSTALL_DIR="$INSTALL_ROOT/native"
-HOST_PATH="$NATIVE_INSTALL_DIR/host-source"
-MANIFEST_DIR="${DARREN_CHROME_MANIFEST_DIR:-$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts}"
-MANIFEST_PATH="$MANIFEST_DIR/$HOST_NAME.json"
-NO_OPEN=0
-NON_INTERACTIVE=0
-
-for argument in "$@"; do
-  case "$argument" in
-    --no-open) NO_OPEN=1 ;;
-    --non-interactive) NON_INTERACTIVE=1 ;;
-    *)
-      echo "Unknown option: $argument" >&2
-      exit 2
-      ;;
-  esac
-done
-
-echo "Darren Video Helper"
-echo "Universal Web Video Downloader"
-echo
-
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "install.command is only for macOS." >&2
-  exit 1
-fi
-
-if [[ ! -x /usr/bin/python3 ]]; then
-  echo "Missing /usr/bin/python3. Install the Apple Command Line Tools, then run this installer again." >&2
-  exit 1
-fi
-
-if [[ ! -f "$SOURCE_HOST" ]]; then
-  echo "Missing source native host: $SOURCE_HOST" >&2
-  echo "This package is incomplete. Re-download the macOS beta package." >&2
-  exit 1
-fi
-
-for tool in ffmpeg ffprobe; do
-  if [[ ! -x "$SOURCE_BIN_DIR/$tool" ]]; then
-    echo "Missing bundled $tool: $SOURCE_BIN_DIR/$tool" >&2
-    echo "This package is incomplete. Re-download the macOS beta package." >&2
-    exit 1
-  fi
-done
-
-if [[ ! -x /opt/homebrew/bin/yt-dlp && ! -x /usr/local/bin/yt-dlp ]]; then
-  echo "Homebrew yt-dlp was not found." >&2
-  if command -v brew >/dev/null 2>&1; then
-    echo "Install it in Terminal with: brew install yt-dlp" >&2
-  else
-    echo "Install Homebrew from https://brew.sh, then run: brew install yt-dlp" >&2
-  fi
-  echo "After installation, double-click install.command again." >&2
-  exit 1
-fi
-
-mkdir -p "$NATIVE_INSTALL_DIR/bin" "$MANIFEST_DIR"
-
-if [[ -f "$NATIVE_INSTALL_DIR/host.py" ]]; then
-  BACKUP_PATH="$NATIVE_INSTALL_DIR/host.py.backup-$(date +%Y%m%d-%H%M%S)"
-  cp -p "$NATIVE_INSTALL_DIR/host.py" "$BACKUP_PATH"
-  echo "Backed up previous source host: $BACKUP_PATH"
-fi
-
-if [[ -e "$NATIVE_INSTALL_DIR/bin/yt-dlp" ]]; then
-  LEGACY_YTDLP_BACKUP="$NATIVE_INSTALL_DIR/bin/yt-dlp.disabled-$(date +%Y%m%d-%H%M%S)"
-  mv "$NATIVE_INSTALL_DIR/bin/yt-dlp" "$LEGACY_YTDLP_BACKUP"
-  echo "Disabled legacy bundled yt-dlp: $LEGACY_YTDLP_BACKUP"
-fi
-
-install -m 0644 "$SOURCE_HOST" "$NATIVE_INSTALL_DIR/host.py"
-install -m 0755 "$SOURCE_BIN_DIR/ffmpeg" "$NATIVE_INSTALL_DIR/bin/ffmpeg"
-install -m 0755 "$SOURCE_BIN_DIR/ffprobe" "$NATIVE_INSTALL_DIR/bin/ffprobe"
-
-HOST_TEMP="$HOST_PATH.tmp"
-cat > "$HOST_TEMP" <<'HOST'
 #!/bin/bash
 set -euo pipefail
-
-NATIVE_ROOT="$(cd "$(dirname "$0")" && pwd)"
-LOG_PATH="${VIDEO_HELPER_LOG_PATH:-$HOME/Library/Logs/DarrenVideoHelper/native-host.log}"
-mkdir -p "$(dirname "$LOG_PATH")"
-export PATH="$NATIVE_ROOT/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-exec /usr/bin/python3 "$NATIVE_ROOT/host.py" "$@" 2>> "$LOG_PATH"
-HOST
-chmod 0755 "$HOST_TEMP"
-mv "$HOST_TEMP" "$HOST_PATH"
-
-if [[ -x /usr/bin/xattr ]]; then
-  /usr/bin/xattr -dr com.apple.quarantine "$NATIVE_INSTALL_DIR"
-fi
-
-HOST_PATH_JSON=${HOST_PATH//\\/\\\\}
-HOST_PATH_JSON=${HOST_PATH_JSON//\"/\\\"}
-cat > "$MANIFEST_PATH" <<JSON
-{
-  "name": "$HOST_NAME",
-  "description": "Darren Video Helper Native Host",
-  "path": "$HOST_PATH_JSON",
-  "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://$EXTENSION_ID/"
-  ]
+PACKAGE_ROOT="$(cd "$(dirname "$0")" && pwd)"
+HOST_NAME="com.darren.videohelper"
+INSTALL_ROOT="${DARREN_INSTALL_ROOT:-$HOME/Library/Application Support/DarrenVideoHelper}"
+MANIFEST_DIR="${DARREN_CHROME_MANIFEST_DIR:-$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts}"
+NATIVE_INSTALL_DIR="$INSTALL_ROOT/native"
+HOST_PATH="$NATIVE_INSTALL_DIR/host-source"
+EXTENSION_DIR="$PACKAGE_ROOT/extension"
+NO_OPEN=0; NON_INTERACTIVE=0; CHECK_ONLY=0
+finish() {
+  result=$?
+  if [[ "$result" -ne 0 ]]; then echo "Installation failed. See docs/INSTALL.md for help. No download was started." >&2; fi
+  if [[ "$NON_INTERACTIVE" -eq 0 && -t 0 ]]; then read -r -p "Press Enter to close..." || true; fi
 }
-JSON
-
-echo "Registered Native Messaging Host:"
-echo "$MANIFEST_PATH"
-echo
-echo "Running mandatory native-host self-test..."
-SELF_TEST_OUTPUT="$("$HOST_PATH" --self-test)"
-printf '%s\n' "$SELF_TEST_OUTPUT"
-printf '%s' "$SELF_TEST_OUTPUT" | /usr/bin/python3 -c '
-import json
-import pathlib
-import sys
-
-data = json.load(sys.stdin)
-if data.get("ok") is not True:
-    raise SystemExit("Native host self-test did not return ok=true")
-
-yt_dlp = pathlib.Path(data.get("yt-dlp", "")).resolve()
-allowed_ytdlp = {
-    pathlib.Path("/opt/homebrew/bin/yt-dlp").resolve(),
-    pathlib.Path("/usr/local/bin/yt-dlp").resolve(),
+trap finish EXIT
+for arg in "$@"; do
+  case "$arg" in
+    --no-open) NO_OPEN=1;;
+    --non-interactive) NON_INTERACTIVE=1;;
+    --check) CHECK_ONLY=1;;
+    *) echo "Unknown option: $arg" >&2; exit 2;;
+  esac
+done
+[[ "$(uname -s)" == Darwin ]] || { echo 'macOS only. Windows/Linux Full is unsupported.' >&2; exit 1; }
+echo 'DarrenVideoHelper Full v1.2.1-beta.16 — dependency check'
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+PYTHON="$(command -v python3 || true)"
+[[ -n "$PYTHON" ]] && "$PYTHON" -c 'import sys; assert sys.version_info >= (3,9)' || {
+ echo 'Python 3.9+ is required. Install dependencies: brew install python yt-dlp ffmpeg' >&2; exit 1;
 }
-if yt_dlp not in allowed_ytdlp:
-    raise SystemExit(f"Expected Homebrew yt-dlp, got: {yt_dlp}")
-
-native_root = pathlib.Path(sys.argv[1]).resolve()
-for tool in ("ffmpeg", "ffprobe"):
-    actual = pathlib.Path(data.get(tool, "")).resolve()
-    expected = native_root / "bin" / tool
-    if actual != expected:
-        raise SystemExit(f"Expected bundled {tool} at {expected}, got: {actual}")
-' "$NATIVE_INSTALL_DIR"
-echo "Native-host self-test passed."
-"$HOST_PATH" --recover-legacy-outputs
-echo
-
+for tool in yt-dlp ffmpeg ffprobe; do
+  command -v "$tool" >/dev/null || { echo "Missing $tool. Install dependencies: brew install python yt-dlp ffmpeg" >&2; exit 1; }
+done
+export VIDEO_HELPER_EXTERNAL_TOOLS=1
+"$PYTHON" "$PACKAGE_ROOT/native/host.py" --self-test
+EXTENSION_ID="$("$PYTHON" - "$PACKAGE_ROOT/extension/manifest.json" <<'PY'
+import base64,hashlib,json,sys
+m=json.load(open(sys.argv[1])); h=hashlib.sha256(base64.b64decode(m['key'])).hexdigest()[:32]
+print(''.join(chr(97+int(c,16)) for c in h))
+PY
+)"
+[[ "$EXTENSION_ID" == mabnjnddplpelefjgohbjcoajnimpgna ]] || { echo 'Unexpected extension ID.' >&2; exit 1; }
+[[ "$CHECK_ONLY" -eq 0 ]] || { echo 'Dependency and extension-ID checks passed; nothing installed.'; exit 0; }
+mkdir -p "$NATIVE_INSTALL_DIR" "$MANIFEST_DIR"
+chmod 700 "$INSTALL_ROOT" "$NATIVE_INSTALL_DIR"
+install -m 0644 "$PACKAGE_ROOT/native/host.py" "$NATIVE_INSTALL_DIR/host.py"
+# Quote the interpreter path safely; never interpolate it into Python code.
+{ printf '#!/bin/bash\nset -euo pipefail\nexport PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin\nexport VIDEO_HELPER_EXTERNAL_TOOLS=1\n';
+  printf 'NATIVE_ROOT="$(cd "$(dirname "$0")" && pwd)"\nexec %q "$NATIVE_ROOT/host.py" "$@"\n' "$PYTHON";
+} > "$HOST_PATH.tmp"
+chmod 0755 "$HOST_PATH.tmp"; mv "$HOST_PATH.tmp" "$HOST_PATH"
+"$HOST_PATH" --self-test
+"$PYTHON" - "$MANIFEST_DIR/$HOST_NAME.json" "$HOST_PATH" "$EXTENSION_ID" <<'PY'
+import json,os,pathlib,sys
+path=pathlib.Path(sys.argv[1]); tmp=path.with_suffix('.tmp')
+tmp.write_text(json.dumps({'name':'com.darren.videohelper','description':'DarrenVideoHelper Native Host',
+ 'path':sys.argv[2],'type':'stdio','allowed_origins':['chrome-extension://'+sys.argv[3]+'/']},indent=2)+'\n')
+tmp.chmod(0o600);os.replace(tmp,path)
+PY
+echo 'Native Host registered; self-test passed.'
+echo "Chrome extension directory: $EXTENSION_DIR"
+echo 'In chrome://extensions enable Developer mode, Load unpacked, then select extension/.'
+echo 'Chrome requires this final manual step for unpacked extensions.'
 if [[ "$NO_OPEN" -eq 0 ]]; then
-  if ! open -a "Google Chrome" "chrome://extensions/" >/dev/null 2>&1; then
-    echo "Could not open Chrome automatically. Open chrome://extensions/ manually."
-  fi
-  if ! open "$EXTENSION_DIR" >/dev/null 2>&1; then
-    echo "Could not open the extension folder automatically. Use the path printed below."
-  fi
-fi
-
-echo "Chrome extension folder to load:"
-echo "$EXTENSION_DIR"
-echo
-echo "In Chrome:"
-echo "1. Enable Developer mode"
-echo "2. Click Load unpacked"
-echo "3. Select the extension folder above"
-echo
-echo "Chrome requires this final manual step for unpacked extensions."
-echo "The installer cannot safely bypass it."
-echo
-
-if [[ "$NON_INTERACTIVE" -eq 0 && -t 0 ]]; then
-  read -r -p "Press Enter to close..."
+ open -a 'Google Chrome' 'chrome://extensions/' || true
+ open "$EXTENSION_DIR" || true
 fi

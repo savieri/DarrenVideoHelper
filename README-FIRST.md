@@ -1,16 +1,15 @@
-# Darren Video Helper v1.2.1-beta.15
+# Start here / 先看这里 — v1.2.1-beta.16
 
-弹窗列出当前标签页已发现的 HLS 清单和变体、MP4、WebM。使用顶部下拉菜单按大小、时长或清晰度排序。广告和预览片默认折叠。每条下载对应那一行的资源地址。HLS 主清单是可包含多个清晰度的入口，下载按钮选择清单内的最佳可用版本。要指定清晰度，请点对应变体的下载按钮。
+For the simplest setup, download DarrenVideoHelper-Chrome-Extension.zip from the
+GitHub Release. Unzip → chrome://extensions → Developer mode → Load unpacked →
+select the folder directly containing manifest.json. Direct MP4/WebM requires no
+extra software. Chrome requires this final manual step.
 
-有清单实测时长和播放器证据时才推荐主视频。HLS 大小使用已观察分片或清单码率估算。缺少数据时显示“大小未知”。有访问或绑定缺口时查看“采集情况”及“导出诊断”。
+最简单安装：下载 Chrome 独立包 → 解压 → chrome://extensions → 开发者模式 →
+加载已解压的扩展程序 → 选择含 manifest.json 的目录。视频网页播放后点击插件。
 
-## 在本机安装或升级
+macOS Full requires Python 3.9+, yt-dlp, FFmpeg and ffprobe already installed.
+Run install.command, then load extension/. Full is not a zero-dependency installer.
+HLS/DASH/site extraction uses the native pipeline. Both editions use Chrome for direct files.
 
-1. 解压 ZIP。已有 Homebrew 安装的 yt-dlp 和 ffmpeg 可以直接继续。缺少时运行 `brew install yt-dlp ffmpeg`。随包的 ffmpeg 和 ffprobe 需要本机 Homebrew 的媒体库。
-2. 双击 `install.command`，等待 `Native-host self-test passed.`。
-3. 保留当前加载的扩展目录，把新版 `extension` 内容覆盖进去，然后打开 `chrome://extensions` 点击重新加载。新安装则选择“加载未打包的扩展程序”，指向新版的 `extension`。受 Chrome 的安全限制，加载扩展需要在浏览器中手动完成。
-4. 刷新已打开的网页后开始播放，让新版从页面启动起采集。确认弹窗版本为 beta.15。
-
-安装时会复查旧版因解码校验超时而标记失败的成品。复查成功后只清理属于该任务的临时文件。新版把续传文件保存在输出目录内的隐藏子目录，任务校验通过后清理。
-
-选中的媒体地址失效时，刷新源网页的播放状态和弹窗资源列表，再选择更新的地址。扩展保存任务的完整进程诊断，导出时隐去 Cookie 和已知签名参数。
+Read README.md / README.zh-CN.md for downloads, limitations and troubleshooting.
